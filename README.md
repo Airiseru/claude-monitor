@@ -9,8 +9,12 @@ npm run hooks:install       # adds hooks + status line wrapper to ~/.claude/sett
 npm run service:install     # starts the server now and at every login: http://localhost:4747
 npm test
 
+npm run service:stop        # stop until the next login (or service:start)
+npm run service:start       # start again after stopping
+npm run service:restart     # restart, e.g. after updating the monitor's code
+npm run service:uninstall   # stop for good: no more starting at login
+
 npm start                   # or run the server by hand instead of the login service
-npm run service:uninstall   # stop the login service
 npm run hooks:uninstall     # removes exactly what hooks:install added, restores your status line
 ```
 
