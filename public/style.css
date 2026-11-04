@@ -299,11 +299,9 @@ textarea.input, .composer textarea { resize: vertical; }
 
 .files { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
 .file + .file { border-top: 1px solid var(--border); }
-/* The row is a toggle button; "Open in …" sits over its right end (buttons can't nest). */
-.file { position: relative; }
-.file-head { padding-right: 120px; }
-.open-file { position: absolute; top: 8px; right: 12px; }
-.open-error { position: absolute; top: 30px; right: 12px; font-size: 12px; }
+.file-actions { display: flex; align-items: center; gap: 10px; padding-top: 2px; }
+.file-actions .btn { padding: 4px 12px; }
+.file-actions .form-error { margin: 0; font-size: 12px; }
 .file-head {
   display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left;
   background: none; border: 0; padding: 8px 12px; cursor: pointer;

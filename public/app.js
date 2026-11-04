@@ -712,9 +712,6 @@ function fileRow(f, d) {
   const ok = f.edits.length - failed;
   const cwd = d.cwd;
   return h('li', { class: 'file' },
-    h('button', { class: 'link open-file', onclick: () => openFile(d.id, f.path), 'aria-label': `Open ${shortPath(f.path, cwd)}` },
-      setup.editor ? `Open in ${setup.editor === 'Visual Studio Code' ? 'VS Code' : setup.editor}` : 'Open'),
-    fileErrors.has(f.path) && h('span', { class: 'form-error open-error' }, fileErrors.get(f.path)),
     h('button', {
       class: 'file-head', 'aria-expanded': String(open),
       onclick: () => { open ? openFiles.delete(f.path) : openFiles.add(f.path); renderDetail(); },
@@ -722,7 +719,12 @@ function fileRow(f, d) {
       h('span', { class: 'chev', 'aria-hidden': 'true' }, open ? '▾' : '▸'),
       h('span', { class: 'path' }, shortPath(f.path, cwd)),
       h('span', { class: 'muted' }, `${ok} edit${ok === 1 ? '' : 's'}${failed ? ` · ${failed} failed` : ''} · ${clock(f.edits.at(-1).ts)}`)),
-    open && h('div', { class: 'edits' }, [...f.edits].reverse().map((e) =>
+    open && h('div', { class: 'edits' },
+      h('div', { class: 'file-actions' },
+        h('button', { class: 'btn', onclick: () => openFile(d.id, f.path), 'aria-label': `Open ${shortPath(f.path, cwd)} in ${setup.editor ?? 'your editor'}` },
+          setup.editor ? `Open in ${setup.editor === 'Visual Studio Code' ? 'VS Code' : setup.editor}` : 'Open in editor'),
+        fileErrors.has(f.path) && h('span', { class: 'form-error' }, fileErrors.get(f.path))),
+      [...f.edits].reverse().map((e) =>
       h('div', { class: `edit ${e.failed ? 'failed' : ''}` },
         h('div', { class: 'edit-meta' }, `${clock(e.ts)} · ${e.tool}${e.failed ? ' · failed, file unchanged' : ''}`),
         e.before != null && h('pre', { class: 'diff del' }, e.before),
