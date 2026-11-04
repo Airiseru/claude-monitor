@@ -14,6 +14,7 @@
       <span class="brand">Claude Monitor</span>
     </div>
     <div class="top-right">
+      <div id="limits" class="limits" role="group" aria-label="Your plan’s usage limits"></div>
       <button id="notify" class="btn" aria-pressed="false">Notifications off</button>
       <span id="conn" class="conn">Connecting…</span>
     </div>
@@ -25,6 +26,12 @@
         <button id="new-session" class="btn new-session">+ New session</button>
         <input id="search" class="input" type="search" placeholder="Search titles, folders, prompts, replies" aria-label="Search sessions">
         <span class="select-wrap"><select id="project" class="input" aria-label="Filter by project"><option value="">All projects</option></select></span>
+        <div class="group-by" role="group" aria-label="Group sessions by">
+          <span class="muted">Group by</span>
+          <button type="button" class="seg" data-group="status" aria-pressed="true">Status</button>
+          <button type="button" class="seg" data-group="project" aria-pressed="false">Project</button>
+        </div>
+        <p class="keys muted">Keys: <kbd>/</kbd> search · <kbd>↑</kbd><kbd>↓</kbd> move · <kbd>a</kbd> allow · <kbd>d</kbd> deny · <kbd>n</kbd> new · <kbd>w</kbd> Warp</p>
       </div>
       <nav id="sessions" class="sessions" aria-label="Sessions"></nav>
     </aside>

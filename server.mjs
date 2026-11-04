@@ -187,11 +187,23 @@ async function scanStatusDir() {
     const st = await stat(join(STATUS_DIR, file)).catch(() => null);
     if (!st || statusMtimes.get(file) === st.mtimeMs) continue;
     statusMtimes.set(file, st.mtimeMs);
-    await loadStatus(file);
+    await loadStatus(file, st.mtimeMs);
   }
 }
 
-async function loadStatus(file) {
+// Your plan's usage limits are account-wide, so the freshest snapshot from any session wins.
+// { fiveHour, sevenDay: { pct, resetsAt (ms) } | null, at (ms) } once a status line reports them.
+let limits = null;
+
+function readLimits(rateLimits, at) {
+  const window = (w) => (w && typeof w.used_percentage === 'number'
+    ? { pct: w.used_percentage, resetsAt: typeof w.resets_at === 'number' ? w.resets_at * 1000 : null }
+    : null);
+  const next = { fiveHour: window(rateLimits?.five_hour), sevenDay: window(rateLimits?.seven_day), at };
+  if ((next.fiveHour || next.sevenDay) && !(limits?.at > at)) limits = next;
+}
+
+async function loadStatus(file, mtimeMs = Date.now()) {
   const id = basename(file, '.json');
   if (!file.endsWith('.json') || !SESSION_ID.test(id)) return;
   try {
@@ -209,6 +221,7 @@ async function loadStatus(file) {
       linesAdded: c.total_lines_added ?? null,
       linesRemoved: c.total_lines_removed ?? null,
     });
+    readLimits(s.rate_limits, mtimeMs);
     broadcast();
   } catch {
     // Removed or unreadable: keep the last good snapshot.
@@ -252,7 +265,7 @@ function broadcast() {
   if (broadcastTimer) return;
   broadcastTimer = setTimeout(() => {
     broadcastTimer = null;
-    const msg = `event: sessions\ndata: ${JSON.stringify(list())}\n\n`;
+    const msg = `event: sessions\ndata: ${JSON.stringify(list())}\n\nevent: limits\ndata: ${JSON.stringify(limits)}\n\n`;
     for (const res of clients) res.write(msg);
   }, 200);
 }
@@ -512,13 +525,14 @@ async function handle(req, res) {
 
   if (pathname === '/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
-    res.write(`event: sessions\ndata: ${JSON.stringify(list())}\n\n`);
+    res.write(`event: sessions\ndata: ${JSON.stringify(list())}\n\nevent: limits\ndata: ${JSON.stringify(limits)}\n\n`);
     clients.add(res);
     req.on('close', () => clients.delete(res));
     return;
   }
 
   if (pathname === '/api/sessions') return sendJson(res, list());
+  if (pathname === '/api/limits') return sendJson(res, limits);
 
   const m = pathname.match(/^\/api\/sessions\/([\w-]+)$/);
   if (m) {

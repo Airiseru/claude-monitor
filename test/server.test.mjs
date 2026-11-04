@@ -203,6 +203,16 @@ test('page actions validate their input', async () => {
   assert.equal((await act('/api/hide', { ids: ['../x'] })).status, 400);
 });
 
+test('usage limits come from the freshest status line snapshot', async () => {
+  const status = join(monitorHome, 'status');
+  mkdirSync(status, { recursive: true });
+  const snapshot = (pct) => JSON.stringify({ session_id: SESSION, rate_limits: { five_hour: { used_percentage: pct, resets_at: 1793790000 }, seven_day: { used_percentage: 4, resets_at: 1794294000 } } });
+  writeFileSync(join(status, `${SESSION}.json`), snapshot(14));
+  const limits = await waitFor(async () => (await request('GET', '/api/limits')).json(), 'limits', 5000);
+  assert.deepEqual(limits.fiveHour, { pct: 14, resetsAt: 1793790000000 });
+  assert.equal(limits.sevenDay.pct, 4);
+});
+
 test('a removed session stays removed across a restart and comes back on new activity', async () => {
   assert.equal((await act('/api/hide', { ids: [SESSION] })).status, 200);
   assert.equal(await sessionNow(), undefined);

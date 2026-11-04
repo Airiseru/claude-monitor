@@ -314,8 +314,36 @@ function startingCard() {
       h('div', { class: 'card-line' }, 'Starting Claude Code…')));
 }
 
+// Sidebar sections: by status (Needs you first), or by project folder (most recently active
+// first, and within a project the sessions that need you first).
+const STATUS_ORDER = Object.fromEntries(SECTIONS.map(([status], i) => [status, i]));
+let groupBy = pref.get('group') === 'project' ? 'project' : 'status';
+let visibleOrder = []; // session ids in the order shown, for ↑/↓
+
+function groupSessions(list) {
+  const recent = (a, b) => b.lastEventAt - a.lastEventAt;
+  if (groupBy === 'status') {
+    return SECTIONS.map(([status, label]) => ({ label, className: status, sessions: list.filter((s) => s.status === status).sort(recent) }))
+      .filter((g) => g.sessions.length);
+  }
+  const byFolder = new Map();
+  for (const s of list) {
+    const key = s.cwd ?? '';
+    if (!byFolder.has(key)) byFolder.set(key, []);
+    byFolder.get(key).push(s);
+  }
+  return [...byFolder].map(([cwd, group]) => ({
+    label: cwd ? tilde(cwd) : 'Unknown folder',
+    className: 'project',
+    needs: group.filter((s) => s.status === 'needs_you').length,
+    latest: Math.max(...group.map((s) => s.lastEventAt)),
+    sessions: group.sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || recent(a, b)),
+  })).sort((a, b) => b.latest - a.latest);
+}
+
 function renderList() {
   document.getElementById('new-session').classList.toggle('selected', newSessionOpen);
+  for (const b of document.querySelectorAll('.group-by .seg')) b.setAttribute('aria-pressed', String(b.dataset.group === groupBy));
   renderProjectOptions();
   const nav = document.getElementById('sessions');
   nav.replaceChildren();
@@ -331,16 +359,17 @@ function renderList() {
   } else if (!shown.length) {
     nav.append(h('p', { class: 'empty' }, 'No sessions match.'));
   }
-  for (const [status, label] of SECTIONS) {
-    const group = shown.filter((s) => s.status === status).sort((a, b) => b.lastEventAt - a.lastEventAt);
-    if (!group.length) continue;
-    nav.append(h('h2', { class: `section ${status}` },
-      h('span', { class: 'section-label' }, label),
-      h('span', { class: 'count' }, group.length),
-      !LIVE.has(status) && h('button', {
-        class: 'link', 'aria-label': `Remove all ${group.length} from the list`, onclick: () => removeSessions(group.map((s) => s.id)),
+  visibleOrder = [];
+  for (const g of groupSessions(shown)) {
+    const removable = g.sessions.filter((s) => !LIVE.has(s.status));
+    nav.append(h('h2', { class: `section ${g.className}` },
+      h('span', { class: 'section-label' }, g.label),
+      h('span', { class: 'count' }, g.sessions.length),
+      g.needs > 0 && groupBy === 'project' && h('span', { class: 'count needs' }, `${g.needs} need you`),
+      removable.length > 0 && h('button', {
+        class: 'link', 'aria-label': `Remove ${removable.length} from the list`, onclick: () => removeSessions(removable.map((s) => s.id)),
       }, 'Clear')));
-    for (const s of group) nav.append(card(s));
+    for (const s of g.sessions) { nav.append(card(s)); visibleOrder.push(s.id); }
   }
   const waiting = sessions.filter((s) => s.status === 'needs_you').length;
   document.title = waiting ? `(${waiting}) Claude Monitor` : 'Claude Monitor';
@@ -359,6 +388,7 @@ function card(s) {
     : s.status === 'needs_you' && h('span', { class: 'actions' }, warpButton());
   return h('div', { class: `card-group${actions ? ' with-actions' : ''}` },
     h('button', {
+      'data-id': s.id,
       class: `card ${s.status}${s.id === selectedId ? ' selected' : ''}${removable ? ' removable' : ''}`,
       'aria-current': s.id === selectedId ? 'true' : null,
       onclick: () => select(s.id),
@@ -391,6 +421,75 @@ function clearFilter() {
   document.getElementById('search').value = '';
   document.getElementById('project').value = '';
   renderList();
+}
+
+for (const b of document.querySelectorAll('.group-by .seg')) {
+  b.addEventListener('click', () => { groupBy = b.dataset.group; pref.set('group', groupBy); renderList(); });
+}
+
+// --- keyboard shortcuts --------------------------------------------------------------------
+//   /  search    ↑ ↓ (or k j)  previous / next session    a / d  allow / deny its request
+//   n  new session    w  Go to Warp    Esc  leave a field, or close the new-session form
+
+function moveSelection(step) {
+  if (!visibleOrder.length) return;
+  const at = visibleOrder.indexOf(selectedId);
+  const next = visibleOrder[at === -1 ? (step > 0 ? 0 : visibleOrder.length - 1) : Math.min(Math.max(at + step, 0), visibleOrder.length - 1)];
+  if (next === selectedId) return;
+  select(next);
+  document.querySelector(`.card[data-id="${CSS.escape(next)}"]`)?.scrollIntoView({ block: 'nearest' });
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const el = document.activeElement;
+  if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) {
+    if (e.key === 'Escape') el.blur();
+    return; // typing: leave every other key alone
+  }
+  const s = sessions.find((x) => x.id === selectedId);
+  const request = s?.permissions.find((p) => !p.questions);
+  const keys = {
+    '/': () => document.getElementById('search').focus(),
+    ArrowDown: () => moveSelection(1), j: () => moveSelection(1),
+    ArrowUp: () => moveSelection(-1), k: () => moveSelection(-1),
+    a: () => request && answer(request.id, 'allow'),
+    d: () => request && answer(request.id, 'deny'),
+    n: () => openNewSession(),
+    w: () => goToWarp(),
+    Escape: () => { if (newSessionOpen) { newSessionOpen = false; render(); } },
+  };
+  const run = keys[e.key];
+  if (!run) return;
+  e.preventDefault();
+  run();
+});
+
+// --- usage limits (header) -----------------------------------------------------------------
+
+let limits = null; // { fiveHour, sevenDay: { pct, resetsAt } | null, at }
+
+function resetText(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay ? `resets ${clock(ms)}` : `resets ${d.toLocaleDateString([], { weekday: 'short' })} ${clock(ms)}`;
+}
+
+function renderLimits() {
+  const box = document.getElementById('limits');
+  box.replaceChildren();
+  if (!limits) return;
+  for (const [label, w] of [['5-hour', limits.fiveHour], ['Weekly', limits.sevenDay]]) {
+    if (!w) continue;
+    const pct = Math.round(w.pct);
+    const fill = h('div', { class: `ctx-fill ${pct >= 80 ? 'high' : pct >= 60 ? 'mid' : 'low'}` });
+    fill.style.width = `${Math.min(pct, 100)}%`;
+    box.append(h('div', { class: 'limit' },
+      h('span', { class: 'limit-label' }, `${label} ${pct}%`),
+      h('div', { class: 'ctx-track', role: 'meter', 'aria-valuenow': pct, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-label': `${label} usage limit` }, fill),
+      w.resetsAt && h('span', { class: 'limit-reset' }, resetText(w.resetsAt))));
+  }
 }
 
 document.getElementById('new-session').addEventListener('click', openNewSession);
@@ -825,6 +924,12 @@ function connect() {
     if (s && detailVersion !== versionOf(s)) loadDetailSoon();
     if (s?.need?.kind === 'permission' && !s.permissions.length) checkSetup();
     renderDetail();
+  });
+  es.addEventListener('limits', (e) => {
+    const next = JSON.parse(e.data);
+    if (JSON.stringify(next) === JSON.stringify(limits)) return;
+    limits = next;
+    renderLimits();
   });
   es.onopen = () => { conn.textContent = 'Live'; conn.className = 'conn live'; };
   es.onerror = () => { conn.textContent = 'Disconnected. Is the server running? Retrying…'; conn.className = 'conn down'; };
