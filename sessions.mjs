@@ -34,11 +34,17 @@ export function applyHook(sessions, ev, now) {
     case 'PostToolUse': case 'PostToolUseFailure': case 'PermissionDenied':
       set(s, 'working', null, s.activity);
       break;
+    case 'PermissionRequest':
+      s.activity = describeTool(ev.tool_name, ev.tool_input);
+      set(s, 'needs_you', { kind: 'permission', message: `Wants permission: ${s.activity}` }, s.activity);
+      break;
     case 'Notification':
       // idle_prompt and the rest are informational: Stop already marked the session as waiting.
       if (DECISION_NOTIFICATIONS.has(ev.notification_type)) {
         const kind = ev.notification_type === 'permission_prompt' ? 'permission' : 'question';
-        set(s, 'needs_you', { kind, message: ev.message ?? null }, s.activity);
+        // Keep a more specific message from PermissionRequest over the generic notification.
+        const keep = s.status === 'needs_you' && s.need?.kind === kind;
+        set(s, 'needs_you', keep ? s.need : { kind, message: ev.message ?? null }, s.activity);
       }
       break;
     case 'Stop':

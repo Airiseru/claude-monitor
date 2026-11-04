@@ -34,7 +34,7 @@ claude sessions ──hooks (http POST)──▶ server (127.0.0.1:4747) ──S
 
 - **Server:** one Node process using only built-in modules (`http`, `fs`, `child_process`). No framework, no build step. State lives in memory and is rebuilt from recent transcripts when the server starts.
 - **Page:** one HTML file with plain JS, updated live over Server-Sent Events.
-- **Hooks:** observer hooks are `command` hooks with `async: true` that `curl` the event to the server (2 s limit). Async means they can never slow a session, which matters given the hanging hook seen in Phase 0. Phase 2's `PermissionRequest` hook will be a blocking `http` hook, since it has to return the decision. All of these are added **next to** the existing caveman hooks. If the server is down they fail quietly and Claude carries on as normal.
+- **Hooks:** observer hooks are `command` hooks with `async: true` that `curl` the event to the server (2 s limit). Async means they can never slow a session, which matters given the hanging hook seen in Phase 0. Phase 2's `PermissionRequest` hook is a blocking `command` hook (`curl` to `/permission`, printing the server's decision). A `type: "http"` hook was tried first, but Claude Code 2.1.318 sometimes didn't send it at all. All of these are added **next to** the existing caveman hooks. If the server is down they fail quietly and Claude carries on as normal.
 - **Status line:** a small wrapper saves the stdin JSON to `~/.claude-monitor/status/<session_id>.json`, then pipes the same JSON into the existing `python3 ~/.claude/statusline.py`, so your status line looks the same as now.
 
 ## Permission clicks (the delicate part)
@@ -55,7 +55,16 @@ Ran a throwaway session against `spike/settings.json` with WebFetch prompts:
 - No decision: the terminal prompt stayed up and accepted terminal input.
 - Terminal answer while the hook was still waiting: the tool ran right away, and the hook kept running in the background.
 - The terminal prompt shows about 6 s after `PermissionRequest`, together with `Notification(permission_prompt)`.
-- **Not verified:** the hook timing out. My script's next prompt answered the leftover dialog, so that round never made its own request. Check it in Phase 2.
+- **Not verified:** the hook timing out. My script's next prompt answered the leftover dialog, so that round never made its own request. Verified in Phase 2 (below).
+
+### Phase 2 results (2026-11-04)
+
+Ran a live session against a test server (wait shortened to 20 s), with an open dashboard connection:
+1. Allow from the dashboard: the terminal said "Allowed by PermissionRequest hook".
+2. Deny: Claude received "Denied from Claude Monitor".
+3. Answered in the terminal: the held request was released within about 3 s, the session went back to waiting, and a late dashboard click got 409.
+4. No click before the wait ran out: the server answered with no decision, and the terminal prompt still worked.
+5. Server stopped: the terminal prompt worked as normal, with no hook error shown.
 - Side finding: in one run, another `UserPromptSubmit` hook (not the spike's) hung for over a minute. The monitor's observer hooks must be async so they never add to that.
 
 ## Security
@@ -71,7 +80,7 @@ Each phase is checked end to end before the next one starts.
 
 0. **Spike. Done 2026-11-04,** results above.
 1. **Read-only monitor.** Server, observer hooks, status line wrapper, transcript parser, session list and detail. Check: open 2–3 sessions in Warp and confirm the statuses, context %, and file lists match what the terminals show.
-2. **Needs you + Allow/Deny.** Check: trigger WebFetch prompts in one session. Approve one from the browser, deny one, answer one in the terminal (it must leave "Needs you"), and let one time out. Trigger a sandbox prompt and confirm it shows as "Needs you" with no Allow/Deny buttons. Close the dashboard and confirm prompts behave exactly as before.
+2. **Needs you + Allow/Deny. Built and tested 2026-11-04,** pending your check in the real dashboard. Check: trigger WebFetch prompts in one session. Approve one from the browser, deny one, answer one in the terminal (it must leave "Needs you"), and let one time out. Trigger a sandbox prompt and confirm it shows as "Needs you" with no Allow/Deny buttons. Close the dashboard and confirm prompts behave exactly as before.
 3. **Go to tab.** The button runs `open -a Warp`, and the card shows the session's tab title and folder so you can pick the tab. Check: with 3 sessions open, each card's title and folder match its Warp tab.
 
 ## Risks

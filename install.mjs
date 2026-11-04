@@ -14,9 +14,18 @@ const MARK = 'claude-monitor'; // every command added here contains this; it's h
 const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure',
   'PermissionDenied', 'Notification', 'Stop', 'SessionEnd'];
 const HOOK_COMMAND = `curl -s -m 2 -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:4747/hook >/dev/null 2>&1; true # ${MARK}`;
+// The one blocking hook: it waits for your click in the dashboard, and curl prints the server's
+// decision as the hook's output. If the server isn't running, curl prints nothing and the
+// terminal prompt works as usual. (A `type: 'http'` hook was tried first: in testing Claude
+// Code 2.1.318 sometimes didn't send it at all.)
+const PERMISSION_HOOK = {
+  type: 'command',
+  timeout: 600,
+  command: `curl -s -m 595 -H 'Content-Type: application/json' --data-binary @- 'http://127.0.0.1:4747/permission?from=${MARK}' 2>/dev/null; true`,
+};
 
 const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-const isOurs = (group) => (group?.hooks ?? []).some((h) => String(h.command ?? '').includes(MARK));
+const isOurs = (group) => (group?.hooks ?? []).some((h) => `${h.command ?? ''} ${h.url ?? ''}`.includes(MARK));
 
 function readSettings() {
   return existsSync(SETTINGS) ? JSON.parse(readFileSync(SETTINGS, 'utf8')) : {};
@@ -39,6 +48,9 @@ function install() {
     if (!groups.some(isOurs)) groups.push({ hooks: [{ type: 'command', command: HOOK_COMMAND, async: true }] });
     settings.hooks[event] = groups;
   }
+  const permissionGroups = settings.hooks.PermissionRequest ?? [];
+  if (!permissionGroups.some(isOurs)) permissionGroups.push({ hooks: [PERMISSION_HOOK] });
+  settings.hooks.PermissionRequest = permissionGroups;
 
   const current = settings.statusLine;
   if (!String(current?.command ?? '').includes(MARK)) {
@@ -53,7 +65,7 @@ function install() {
   }
 
   writeSettings(settings);
-  console.log(`Installed hooks for ${EVENTS.length} events and the status line wrapper.`);
+  console.log(`Installed hooks for ${EVENTS.length} events, the permission hook, and the status line wrapper.`);
   console.log('Running sessions pick this up automatically. Start the server with: npm start');
 }
 

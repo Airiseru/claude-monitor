@@ -102,6 +102,35 @@ button { font: inherit; color: inherit; }
 .card-line.need-line { color: var(--needs); font-weight: 550; }
 .card .ctx { margin: 6px 0 0 16px; }
 
+/* A card with Allow/Deny under it: the two pieces read as one card. */
+.card-group { margin-bottom: 6px; }
+.card-group .card { margin-bottom: 0; border-bottom: 0; border-radius: 8px 8px 0 0; }
+.card-actions {
+  background: var(--panel); border: 1px solid var(--border); border-top: 0;
+  border-left: 3px solid var(--needs); border-radius: 0 0 8px 8px; padding: 2px 11px 9px 27px; font-size: 12.5px;
+}
+.card-group .card.selected + .card-actions { border-color: var(--accent); border-left-color: var(--needs); }
+
+.actions { display: inline-flex; gap: 6px; }
+.btn {
+  font-size: 12.5px; font-weight: 600; border-radius: 6px; padding: 4px 14px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text);
+}
+.btn.allow { background: var(--waiting); border-color: var(--waiting); color: var(--panel); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.answered { font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.answered.allow { color: var(--waiting); }
+.answered.deny { color: var(--needs); }
+
+.perm { margin: 8px 0 4px; }
+.perm-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.perm-head strong { word-break: break-word; }
+.perm-input {
+  margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--panel); border: 1px solid var(--border);
+  font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto;
+}
+
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); flex: none; }
 .needs_you .dot { background: var(--needs); }
 .working .dot { background: var(--working); animation: pulse 1.6s ease-in-out infinite; }

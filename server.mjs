@@ -1,9 +1,11 @@
 // Claude Monitor server: receives hook events, watches status line snapshots, reads transcripts,
 // and serves the dashboard. Listens on 127.0.0.1 only.
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
+import { PendingPermissions } from './permissions.mjs';
 import { applyHook } from './sessions.mjs';
 import { parseTranscript } from './transcript.mjs';
 
@@ -13,7 +15,12 @@ const PROJECTS_DIR = process.env.CLAUDE_PROJECTS_DIR ?? join(homedir(), '.claude
 const STATUS_DIR = join(MONITOR_HOME, 'status');
 const RECENT_MS = 24 * 3600_000;
 const MAX_HOOK_BODY = 5_000_000;
+// How long a permission request waits for a click. Just under the hook's 600 s timeout, so
+// the server always answers before Claude Code gives up on the hook.
+const PERMISSION_WAIT_MS = Number(process.env.PERMISSION_WAIT_MS ?? 590_000);
 const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
+const ALLOWED_ORIGINS = new Set([...ALLOWED_HOSTS].map((h) => `http://${h}`));
+const TOKEN = randomBytes(24).toString('hex'); // per run; the page must send it to Allow/Deny
 const SESSION_ID = /^[\w-]+$/;
 const STATIC = {
   '/': ['index.html', 'text/html; charset=utf-8'],
@@ -25,6 +32,7 @@ const sessions = new Map();    // session id -> live state (sessions.mjs)
 const contexts = new Map();    // session id -> latest status line snapshot
 const transcripts = new Map(); // transcript path -> { mtimeMs, size, data }
 const clients = new Set();     // open SSE responses
+const pending = new PendingPermissions();
 
 // --- transcripts ---------------------------------------------------------------------------
 
@@ -106,6 +114,7 @@ function summary(s) {
     id: s.id,
     status: s.status,
     need: s.need,
+    permissions: pending.forSession(s.id),
     activity: s.activity,
     title: t?.title ?? null,
     cwd: s.cwd ?? t?.cwd ?? null,
@@ -152,6 +161,47 @@ function readBody(req, limit) {
   });
 }
 
+async function readJson(req, limit) {
+  try {
+    return JSON.parse(await readBody(req, limit));
+  } catch (err) {
+    throw err instanceof HttpError ? err : new HttpError(400, 'Invalid JSON');
+  }
+}
+
+function tokenMatches(given) {
+  const a = Buffer.from(String(given ?? ''));
+  const b = Buffer.from(TOKEN);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function hookDecision(decision) {
+  const d = decision === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message: 'Denied from Claude Monitor' };
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: d } });
+}
+
+// Holds a PermissionRequest hook open until a click, a terminal answer, or the wait runs out.
+// An empty 200 means "no decision": the terminal prompt carries on as if the monitor weren't there.
+function holdPermission(ev, res) {
+  if (!clients.size) return res.writeHead(200).end(); // no dashboard open: don't hold anything
+  let timer;
+  const id = pending.add(ev, (decision) => {
+    clearTimeout(timer);
+    if (!res.writableEnded) {
+      if (decision) res.writeHead(200, { 'Content-Type': 'application/json' }).end(hookDecision(decision));
+      else res.writeHead(200).end();
+    }
+    broadcast();
+  });
+  timer = setTimeout(() => pending.resolve(id, null), PERMISSION_WAIT_MS);
+  res.on('close', () => {
+    if (res.writableEnded) return;
+    clearTimeout(timer);
+    pending.drop(id);
+    broadcast();
+  });
+}
+
 function sendJson(res, body) {
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(body));
@@ -163,19 +213,49 @@ async function handle(req, res) {
   if (!ALLOWED_HOSTS.has(req.headers.host)) throw new HttpError(403, 'Forbidden');
   const { pathname } = new URL(req.url, 'http://localhost');
 
-  if (req.method === 'POST' && pathname === '/hook') {
-    if (req.headers.origin) throw new HttpError(403, 'Forbidden'); // browsers send Origin; hook curl doesn't
-    let ev;
-    try { ev = JSON.parse(await readBody(req, MAX_HOOK_BODY)); } catch (err) {
-      throw err instanceof HttpError ? err : new HttpError(400, 'Invalid JSON');
-    }
+  if (req.method === 'POST' && (pathname === '/hook' || pathname === '/permission')) {
+    if (req.headers.origin) throw new HttpError(403, 'Forbidden'); // browsers send Origin; hooks don't
+    const ev = await readJson(req, MAX_HOOK_BODY);
     const s = applyHook(sessions, ev, Date.now());
-    res.writeHead(204).end(); // empty response: never changes what the session does
     if (s) { refreshSoon(s.id); broadcast(); }
+    if (pathname === '/permission' && s && ev.hook_event_name === 'PermissionRequest') return holdPermission(ev, res);
+    if (s && pending.settle(ev)) broadcast();
+    res.writeHead(204).end(); // empty response: never changes what the session does
     return;
   }
 
+  const decide = pathname.match(/^\/api\/permissions\/([\w-]+)$/);
+  if (req.method === 'POST' && decide) {
+    // Only this dashboard may answer: same-origin page, holding this run's token.
+    if (!ALLOWED_ORIGINS.has(req.headers.origin) || !tokenMatches(req.headers['x-monitor-token'])) {
+      throw new HttpError(403, 'Forbidden');
+    }
+    const { decision } = await readJson(req, 1000);
+    if (decision !== 'allow' && decision !== 'deny') throw new HttpError(400, 'decision must be allow or deny');
+    const sessionId = pending.resolve(decide[1], decision);
+    if (!sessionId) throw new HttpError(409, 'Already answered');
+    const s = sessions.get(sessionId);
+    if (s?.status === 'needs_you' && !pending.forSession(sessionId).length) {
+      s.status = 'working';
+      s.need = null;
+    }
+    broadcast();
+    return sendJson(res, { ok: true });
+  }
+
   if (req.method !== 'GET') throw new HttpError(405, 'Method not allowed');
+
+  // Readable only by same-origin pages: no CORS headers, and the Host check blocks rebinding.
+  if (pathname === '/api/token') return sendJson(res, { token: TOKEN });
+
+  // Whether `npm run hooks:install` has added the permission hook, so the page can explain a
+  // prompt with no Allow/Deny buttons.
+  if (pathname === '/api/setup') {
+    const settings = await readFile(join(homedir(), '.claude', 'settings.json'), 'utf8').then(JSON.parse).catch(() => ({}));
+    const permissionHook = (settings.hooks?.PermissionRequest ?? [])
+      .some((g) => (g.hooks ?? []).some((h) => String(h.command ?? '').includes('/permission?from=claude-monitor')));
+    return sendJson(res, { permissionHook });
+  }
 
   if (pathname === '/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });

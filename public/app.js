@@ -18,6 +18,18 @@ let detail = null;          // last fetched detail for selectedId
 let detailVersion = null;   // which session state that detail was fetched for
 let detailTimer = null;
 const openFiles = new Set(); // expanded file paths in the detail view
+const answers = new Map();   // permission id -> 'sending' | 'allow' | 'deny' | 'gone' | error text
+const token = fetch('/api/token').then((r) => r.json()).then((d) => d.token);
+let permissionHookInstalled = true; // refreshed from /api/setup whenever a prompt can't be answered here
+
+async function checkSetup() {
+  try {
+    const { permissionHook } = await (await fetch('/api/setup')).json();
+    if (permissionHook !== permissionHookInstalled) { permissionHookInstalled = permissionHook; renderDetail(); }
+  } catch {
+    // Server unreachable: the connection indicator already says so.
+  }
+}
 
 // --- helpers -------------------------------------------------------------------------------
 
@@ -94,9 +106,41 @@ function renderList() {
   document.title = waiting ? `(${waiting}) Claude Monitor` : 'Claude Monitor';
 }
 
+// --- permissions ---------------------------------------------------------------------------
+
+async function answer(id, decision) {
+  answers.set(id, 'sending');
+  render();
+  try {
+    const res = await fetch(`/api/permissions/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Monitor-Token': await token },
+      body: JSON.stringify({ decision }),
+    });
+    answers.set(id, res.ok ? decision : res.status === 409 ? 'gone' : `Couldn’t send (error ${res.status})`);
+  } catch {
+    answers.set(id, 'Couldn’t reach the monitor server');
+  }
+  render();
+}
+
+const ANSWER_TEXT = { sending: 'Sending…', allow: 'Allowed', deny: 'Denied', gone: 'Already answered in the terminal' };
+
+function permissionActions(p) {
+  const state = answers.get(p.id);
+  if (state && state !== 'sending') return h('span', { class: `answered ${state}` }, ANSWER_TEXT[state] ?? state);
+  const busy = state === 'sending';
+  return h('span', { class: 'actions' },
+    h('button', { class: 'btn allow', disabled: busy, onclick: () => answer(p.id, 'allow') }, 'Allow'),
+    h('button', { class: 'btn deny', disabled: busy, onclick: () => answer(p.id, 'deny') }, 'Deny'));
+}
+
+// --- session list --------------------------------------------------------------------------
+
 function card(s) {
   const meta = [folder(s.cwd), s.branch].filter(Boolean).join(' · ');
-  return h('button', {
+  const p = s.permissions[0];
+  const button = h('button', {
     class: `card ${s.status}${s.id === selectedId ? ' selected' : ''}`,
     'aria-current': s.id === selectedId ? 'true' : null,
     onclick: () => select(s.id),
@@ -108,6 +152,11 @@ function card(s) {
     meta && h('div', { class: 'card-meta' }, meta),
     h('div', { class: `card-line ${s.need ? 'need-line' : ''}` }, lineOf(s)),
     contextBar(s.context));
+  if (!p) return button;
+  // Answer the first request right from the list; more than one means opening the session.
+  return h('div', { class: 'card-group' }, button,
+    h('div', { class: 'card-actions' },
+      s.permissions.length > 1 ? h('span', { class: 'muted' }, `${s.permissions.length} requests, open to answer`) : permissionActions(p)));
 }
 
 function select(id) {
@@ -165,10 +214,19 @@ function renderDetail() {
         h('h1', {}, titleOf(s))),
       h('div', { class: 'meta' }, [s.cwd && s.cwd.replace(/^\/Users\/[^/]+/, '~'), s.branch, s.model].filter(Boolean).join('  ·  ')),
       contextBar(s.context, true)),
-    s.need && h('section', { class: 'need-box' },
-      h('h2', {}, s.need.kind === 'permission' ? 'Permission needed' : 'Question for you'),
-      h('p', {}, s.need.message || ''),
-      h('p', { class: 'hint' }, 'Answer it in this session’s Warp tab.')),
+    s.permissions.length ? h('section', { class: 'need-box' },
+      h('h2', {}, s.permissions.length > 1 ? `${s.permissions.length} permission requests` : 'Permission needed'),
+      s.permissions.map((p) => h('div', { class: 'perm' },
+        h('div', { class: 'perm-head' }, h('strong', {}, p.summary), permissionActions(p)),
+        h('pre', { class: 'perm-input' }, p.input))),
+      h('p', { class: 'hint' }, 'You can also answer in the terminal. Whichever answer comes first is used.'))
+      : s.need && h('section', { class: 'need-box' },
+        h('h2', {}, s.need.kind === 'permission' ? 'Permission needed' : 'Question for you'),
+        h('p', {}, s.need.message || ''),
+        h('p', { class: 'hint' }, s.need.kind !== 'permission' ? 'Answer it in this session’s Warp tab.'
+          : permissionHookInstalled
+            ? 'This prompt can only be answered in the session’s Warp tab (sandbox prompts can’t be answered from here).'
+            : 'Allow and Deny need the permission hook, which isn’t installed. Run `npm run hooks:install` in ~/Documents/claude-monitor, then answer this one in Warp. Prompts after that get buttons here.')),
     s.status === 'working' && s.activity && h('p', { class: 'now' }, h('strong', {}, 'Now: '), s.activity),
     s.lastPrompt && h('section', { class: 'block' }, h('h2', {}, 'Last prompt'), h('p', { class: 'prompt' }, s.lastPrompt)),
     !d ? h('p', { class: 'empty' }, 'Loading…')
@@ -231,10 +289,16 @@ function connect() {
     renderList();
     const s = sessions.find((x) => x.id === selectedId);
     if (s && detailVersion !== versionOf(s)) loadDetailSoon();
+    if (s?.need?.kind === 'permission' && !s.permissions.length) checkSetup();
     renderDetail();
   });
   es.onopen = () => { conn.textContent = 'Live'; conn.className = 'conn live'; };
   es.onerror = () => { conn.textContent = 'Disconnected. Is the server running? Retrying…'; conn.className = 'conn down'; };
+}
+
+function render() {
+  renderList();
+  renderDetail();
 }
 
 renderDetail();
