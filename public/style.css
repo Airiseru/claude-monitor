@@ -211,8 +211,14 @@ textarea.input, .composer textarea { resize: vertical; }
 .input:focus-visible, .composer textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
 .form-error { color: var(--ctx-high); margin: 6px 0 0; }
 .folder-row { display: flex; gap: 8px; }
-.folder-row select { flex: 1; min-width: 0; }
 .folder-row .btn { flex: none; }
+/* Own arrow instead of the native one, which sits against the edge and ignores padding. */
+.select-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
+.select-wrap select { appearance: none; -webkit-appearance: none; padding-right: 40px; cursor: pointer; }
+.select-wrap::after {
+  content: ""; position: absolute; right: 16px; top: 50%; width: 7px; height: 7px; pointer-events: none;
+  border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: translateY(-70%) rotate(45deg);
+}
 
 /* The detail view (.detail) is a scrolling area plus the reply box as a footer under it, so
    nothing can scroll beneath or past the reply box. */

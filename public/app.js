@@ -477,7 +477,7 @@ function newSessionForm() {
       authText(setup.auth), '. For your own use only.'),
     h('label', { for: 'new-cwd' }, 'Folder'),
     h('div', { class: 'folder-row' },
-      cwdSelect,
+      h('span', { class: 'select-wrap' }, cwdSelect),
       h('button', { type: 'button', class: 'btn', disabled: newDraft.choosing, onclick: chooseFolder },
         newDraft.choosing ? 'Choosing… (see the dialog)' : 'Choose in Finder…')),
     h('label', { for: 'new-prompt' }, 'First prompt'),
