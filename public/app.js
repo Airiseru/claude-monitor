@@ -1,5 +1,6 @@
 // Dashboard: live session list over Server-Sent Events, session detail fetched on demand.
 // Transcript content is untrusted, so all text goes in through text nodes, never innerHTML.
+import { renderMarkdown, toPlainText } from './markdown.js';
 
 const SECTIONS = [
   ['needs_you', 'Needs you'],
@@ -81,7 +82,7 @@ function titleOf(s) {
 function lineOf(s) {
   if (s.need) return s.need.message || (s.need.kind === 'permission' ? 'Permission needed' : 'Question for you');
   if (s.status === 'working' && s.activity) return s.activity;
-  if (s.status !== 'working' && s.lastResponse) return `Claude: ${s.lastResponse}`;
+  if (s.status !== 'working' && s.lastResponse) return `Claude: ${toPlainText(s.lastResponse)}`;
   return s.lastPrompt ? `You: ${s.lastPrompt}` : '';
 }
 
@@ -237,7 +238,7 @@ function notifyChanges(list) {
       if (s.status === 'needs_you' && was !== 'needs_you') {
         notify(s, 'Needs you', s.permissions[0]?.summary ?? s.need?.message);
       } else if (s.status === 'waiting' && was === 'working') {
-        notify(s, 'Finished', s.lastResponse ?? s.lastPrompt);
+        notify(s, 'Finished', s.lastResponse ? toPlainText(s.lastResponse) : s.lastPrompt);
       }
     }
   }
@@ -342,7 +343,7 @@ function replySection(s, d) {
   return h('section', { class: 'block' },
     h('h2', {}, d.turnEnded ? 'Claude’s reply' : 'Claude’s reply so far',
       d.lastResponseAt && h('span', { class: 'muted small' }, clock(d.lastResponseAt))),
-    h('div', { class: `reply${long && !open ? ' clipped' : ''}` }, d.lastResponse),
+    h('div', { class: `reply md${long && !open ? ' clipped' : ''}` }, renderMarkdown(d.lastResponse)),
     long && h('button', { class: 'link', 'aria-expanded': String(open), onclick: toggle }, open ? 'Show less' : 'Show all'));
 }
 
