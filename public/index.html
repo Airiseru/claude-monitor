@@ -19,7 +19,20 @@
   </header>
   <div class="layout">
     <nav id="sessions" class="sessions" aria-label="Sessions"></nav>
-    <main id="detail" class="detail"></main>
+    <main id="detail" class="detail">
+      <div id="detail-content"></div>
+      <!-- Built once and only shown/hidden, so what you type survives live updates. -->
+      <form id="composer" class="composer" hidden>
+        <p id="composer-note" class="hint"></p>
+        <textarea id="composer-text" rows="3" placeholder="Reply to Claude…  (⌘/Ctrl + Enter to send)" aria-label="Message to Claude"></textarea>
+        <div class="composer-actions">
+          <span id="composer-status" class="hint" role="status"></span>
+          <button type="button" id="composer-stop" class="btn">Stop</button>
+          <button type="button" id="composer-end" class="btn">End session</button>
+          <button type="submit" id="composer-send" class="btn allow">Send</button>
+        </div>
+      </form>
+    </main>
   </div>
   <script type="module" src="/app.js"></script>
 </body>

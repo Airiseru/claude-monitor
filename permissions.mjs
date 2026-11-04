@@ -1,5 +1,6 @@
 // Permission requests held open until you click Allow or Deny in the dashboard, or until the
 // session moves on without the dashboard (you answered in the terminal, or the turn ended).
+// For dashboard sessions this also holds Claude's questions (AskUserQuestion) until answered.
 import { randomUUID } from 'node:crypto';
 import { describeTool } from './tools.mjs';
 
@@ -12,14 +13,21 @@ const MAX_INPUT_SHOWN = 3000;
 export class PendingPermissions {
   #items = new Map(); // request id -> { id, sessionId, tool, input, summary, createdAt, respond }
 
-  // `respond(decision)` answers the held hook; decision is 'allow', 'deny' or null (no decision).
+  // `respond(decision)` answers the request; decision is 'allow', 'deny', null (no decision), or
+  // for a question { answers: { [question text]: answer } }.
   add(ev, respond) {
     const id = randomUUID();
+    const input = ev.tool_input ?? {};
     this.#items.set(id, {
-      id, sessionId: ev.session_id, tool: ev.tool_name, input: ev.tool_input ?? {},
-      summary: describeTool(ev.tool_name, ev.tool_input), createdAt: Date.now(), respond,
+      id, sessionId: ev.session_id, tool: ev.tool_name, input,
+      questions: ev.tool_name === 'AskUserQuestion' && Array.isArray(input.questions) ? input.questions : null,
+      summary: describeTool(ev.tool_name, input), createdAt: Date.now(), respond,
     });
     return id;
+  }
+
+  get(id) {
+    return this.#items.get(id) ?? null;
   }
 
   // Returns the request's session id, or null if it was already answered or dropped.
@@ -55,8 +63,8 @@ export class PendingPermissions {
   forSession(sessionId) {
     return [...this.#items.values()]
       .filter((p) => p.sessionId === sessionId)
-      .map(({ id, tool, input, summary, createdAt }) => ({
-        id, tool, summary, createdAt, input: JSON.stringify(input, null, 2).slice(0, MAX_INPUT_SHOWN),
+      .map(({ id, tool, input, questions, summary, createdAt }) => ({
+        id, tool, summary, createdAt, questions, input: JSON.stringify(input, null, 2).slice(0, MAX_INPUT_SHOWN),
       }));
   }
 }

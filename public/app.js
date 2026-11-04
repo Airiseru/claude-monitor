@@ -23,8 +23,13 @@ let detailTimer = null;
 const openFiles = new Set(); // expanded file paths in the detail view
 const openReplies = new Set(); // session ids whose long reply is expanded
 const answers = new Map();   // permission id -> 'sending' | 'allow' | 'deny' | 'gone' | error text
+const picks = new Map();     // question request id -> { [question]: Set of picked labels }
+const others = new Map();    // question request id -> { [question]: typed answer }
 const token = fetch('/api/token').then((r) => r.json()).then((d) => d.token);
 let permissionHookInstalled = true; // refreshed from /api/setup whenever a prompt can't be answered here
+let setup = { auth: null, folders: [] }; // from /api/setup: login in use, recent folders
+let newSessionOpen = false;
+const newDraft = { cwd: '', prompt: '', error: null, busy: false };
 
 // --- helpers -------------------------------------------------------------------------------
 
@@ -148,11 +153,134 @@ function permissionActions(p) {
 
 const warpButton = () => h('button', { class: 'btn', onclick: goToWarp }, 'Go to Warp');
 
+// Claude's AskUserQuestion, answered from the page (dashboard sessions only): pick options, or
+// type your own answer, for each question.
+function questionForm(p) {
+  const state = answers.get(p.id);
+  if (state && state !== 'sending') return h('p', { class: `answered ${state}` }, state === 'allow' ? 'Answer sent' : ANSWER_TEXT[state] ?? state);
+  const chosen = picks.get(p.id) ?? {};
+  const typed = others.get(p.id) ?? {};
+  const answerFor = (q) => (typed[q.question]?.trim() || [...(chosen[q.question] ?? [])].join(', '));
+  const complete = p.questions.every((q) => answerFor(q));
+
+  const pick = (q, label) => {
+    const set = new Set(q.multiSelect ? chosen[q.question] : []);
+    set.has(label) ? set.delete(label) : set.add(label);
+    picks.set(p.id, { ...chosen, [q.question]: set });
+    renderDetail();
+  };
+  const submit = async (e) => {
+    e.preventDefault();
+    document.activeElement?.blur();
+    answers.set(p.id, 'sending');
+    render();
+    try {
+      const res = await post(`/api/permissions/${encodeURIComponent(p.id)}`, {
+        answers: Object.fromEntries(p.questions.map((q) => [q.question, answerFor(q)])),
+      });
+      answers.set(p.id, res.ok ? 'allow' : res.status === 409 ? 'gone' : `Couldn’t send (error ${res.status})`);
+    } catch {
+      answers.set(p.id, 'Couldn’t reach the monitor server');
+    }
+    render();
+  };
+
+  return h('form', { class: 'question', onsubmit: submit },
+    p.questions.map((q) => {
+      const other = h('input', {
+        class: 'input', placeholder: 'Or type your own answer', 'aria-label': `Your own answer to: ${q.question}`,
+        oninput: (e) => { others.set(p.id, { ...(others.get(p.id) ?? {}), [q.question]: e.target.value }); },
+      });
+      other.value = typed[q.question] ?? '';
+      return h('fieldset', { class: 'q' },
+        h('legend', {}, q.header ? h('span', { class: 'tag' }, q.header) : null, ' ', q.question,
+          q.multiSelect && h('span', { class: 'muted small' }, '  (pick any)')),
+        h('div', { class: 'options' }, (q.options ?? []).map((o) => {
+          const on = chosen[q.question]?.has(o.label);
+          return h('button', { type: 'button', class: `option${on ? ' on' : ''}`, 'aria-pressed': String(Boolean(on)), onclick: () => pick(q, o.label) },
+            h('strong', {}, o.label), o.description && h('span', { class: 'muted' }, o.description));
+        })),
+        other);
+    }),
+    h('div', { class: 'detail-actions' },
+      h('button', { type: 'submit', class: 'btn allow', disabled: state === 'sending' || !complete }, state === 'sending' ? 'Sending…' : 'Send answer'),
+      h('button', { type: 'button', class: 'btn deny', disabled: state === 'sending', onclick: () => answer(p.id, 'deny') }, 'Skip question')));
+}
+
+// --- reply box (dashboard sessions) --------------------------------------------------------
+
+const drafts = new Map(); // session id -> unsent reply text
+const composer = {
+  form: document.getElementById('composer'),
+  note: document.getElementById('composer-note'),
+  text: document.getElementById('composer-text'),
+  status: document.getElementById('composer-status'),
+  stop: document.getElementById('composer-stop'),
+  end: document.getElementById('composer-end'),
+  send: document.getElementById('composer-send'),
+  sessionId: null,
+};
+
+function renderComposer(s) {
+  const show = Boolean(s?.dashboard) && !newSessionOpen;
+  composer.form.hidden = !show;
+  if (!show) { composer.sessionId = null; return; }
+  if (composer.sessionId !== s.id) { // switched session: swap in that session's draft
+    composer.sessionId = s.id;
+    composer.text.value = drafts.get(s.id) ?? '';
+    composer.status.textContent = '';
+  }
+  const live = s.dashboard.live;
+  composer.note.textContent = live
+    ? (s.status === 'working' ? 'Claude is working. What you send now goes after this turn.' : '')
+    : 'This session isn’t running. Sending a message starts it again where it left off.';
+  composer.note.hidden = !composer.note.textContent;
+  composer.stop.hidden = !(live && s.status === 'working');
+  composer.end.hidden = !live;
+}
+
+composer.text.addEventListener('input', () => drafts.set(composer.sessionId, composer.text.value));
+composer.text.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) composer.form.requestSubmit(); });
+
+composer.form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = composer.sessionId;
+  const text = composer.text.value.trim();
+  if (!id || !text) return;
+  composer.send.disabled = true;
+  composer.status.textContent = 'Sending…';
+  try {
+    const res = await post(`/api/sessions/${encodeURIComponent(id)}/send`, { text });
+    if (!res.ok) throw new Error((await res.text()) || `Error ${res.status}`);
+    drafts.delete(id);
+    if (composer.sessionId === id) { composer.text.value = ''; composer.status.textContent = 'Sent'; }
+  } catch (err) {
+    composer.status.textContent = `Not sent: ${err.message}`; // the text stays in the box
+  } finally {
+    composer.send.disabled = false;
+  }
+});
+
+for (const [button, action, label] of [[composer.stop, 'interrupt', 'Stopping…'], [composer.end, 'end', 'Ending…']]) {
+  button.addEventListener('click', async () => {
+    composer.status.textContent = label;
+    const res = await post(`/api/sessions/${encodeURIComponent(composer.sessionId)}/${action}`).catch(() => null);
+    composer.status.textContent = res?.ok ? '' : 'Couldn’t reach the monitor server';
+  });
+}
+
+// Catch up on a redraw that waited while you typed in the detail view.
+document.getElementById('detail-content').addEventListener('focusout', () => {
+  setTimeout(() => { if (detailDeferred) renderDetail(); }, 0);
+});
+
 // --- session list --------------------------------------------------------------------------
 
 function renderList() {
   const nav = document.getElementById('sessions');
-  nav.replaceChildren();
+  nav.replaceChildren(h('button', {
+    class: `btn new-session${newSessionOpen ? ' selected' : ''}`, onclick: openNewSession,
+  }, '+ New session'));
   if (!sessions.length) {
     nav.append(h('p', { class: 'empty' }, 'No sessions in the last 24 hours.'));
   }
@@ -173,7 +301,7 @@ function renderList() {
 }
 
 function card(s) {
-  const meta = [folder(s.cwd), s.branch].filter(Boolean).join(' · ');
+  const meta = [folder(s.cwd), s.branch, s.dashboard && 'started here'].filter(Boolean).join(' · ');
   const removable = !LIVE.has(s.status);
   const p = s.permissions[0];
   const actions = p
@@ -197,6 +325,7 @@ function card(s) {
 }
 
 function select(id) {
+  newSessionOpen = false;
   selectedId = id;
   history.replaceState(null, '', id ? `#${encodeURIComponent(id)}` : location.pathname);
   detail = null;
@@ -269,11 +398,72 @@ const versionOf = (s) => (s ? `${s.lastEventAt}|${s.transcriptUpdatedAt}` : null
 
 async function checkSetup() {
   try {
-    const { permissionHook } = await (await fetch('/api/setup')).json();
+    const { permissionHook, auth, folders } = await (await fetch('/api/setup')).json();
+    setup = { auth, folders: folders ?? [] };
     if (permissionHook !== permissionHookInstalled) { permissionHookInstalled = permissionHook; renderDetail(); }
   } catch {
     // Server unreachable: the connection indicator already says so.
   }
+}
+
+// --- new session ---------------------------------------------------------------------------
+
+async function openNewSession() {
+  selectedId = null;
+  history.replaceState(null, '', location.pathname);
+  newSessionOpen = true;
+  await checkSetup();
+  if (!newDraft.cwd) newDraft.cwd = (setup.folders[0] ?? '').replace(/^\/Users\/[^/]+/, '~');
+  render();
+  document.getElementById('new-prompt')?.focus();
+}
+
+async function startNewSession(e) {
+  e.preventDefault();
+  document.activeElement?.blur(); // leaving the field lets the page redraw (see renderDetail)
+  newDraft.busy = true;
+  newDraft.error = null;
+  renderDetail();
+  try {
+    const res = await post('/api/new-session', { cwd: newDraft.cwd, prompt: newDraft.prompt });
+    const text = await res.text(); // errors come back as plain text
+    if (!res.ok) throw new Error(text || `Error ${res.status}`);
+    Object.assign(newDraft, { prompt: '', busy: false });
+    select(JSON.parse(text).id);
+  } catch (err) {
+    Object.assign(newDraft, { busy: false, error: err.message });
+    renderDetail();
+  }
+}
+
+// What credential dashboard sessions use, in words (SDK apiKeySource; 'none' means no API key,
+// so Claude Code uses your login).
+function authText(auth) {
+  if (auth === 'ANTHROPIC_API_KEY' || auth === 'apiKeyHelper') return 'an API key (billed per token to that API account)';
+  if (auth == null) return 'your Claude login, as in the terminal';
+  return 'your Claude login (no API key found)';
+}
+
+function newSessionForm() {
+  const field = (key) => ({ value: newDraft[key], oninput: (e) => { newDraft[key] = e.target.value; } });
+  const cwdInput = h('input', { id: 'new-cwd', class: 'input', list: 'recent-folders', required: true, autocomplete: 'off', ...field('cwd') });
+  cwdInput.value = newDraft.cwd;
+  const promptInput = h('textarea', { id: 'new-prompt', class: 'input', rows: 6, required: true, ...field('prompt') });
+  promptInput.value = newDraft.prompt;
+  promptInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.target.form.requestSubmit(); });
+  return h('form', { class: 'new-form', onsubmit: startNewSession },
+    h('h1', {}, 'New session'),
+    h('p', { class: 'muted' }, 'Starts Claude Code in a folder and lets you reply from this page. Its permission prompts and questions show up here. It runs with ',
+      authText(setup.auth), '. For your own use only.'),
+    h('label', { for: 'new-cwd' }, 'Folder'),
+    cwdInput,
+    h('datalist', { id: 'recent-folders' }, setup.folders.map((f) => h('option', { value: f.replace(/^\/Users\/[^/]+/, '~') }))),
+    h('label', { for: 'new-prompt' }, 'First prompt'),
+    promptInput,
+    newDraft.error && h('p', { class: 'form-error', role: 'alert' }, newDraft.error),
+    h('div', { class: 'detail-actions' },
+      h('button', { type: 'submit', class: 'btn allow', disabled: newDraft.busy }, newDraft.busy ? 'Starting…' : 'Start session'),
+      h('button', { type: 'button', class: 'btn', onclick: () => { newSessionOpen = false; render(); } }, 'Cancel')));
 }
 
 async function loadDetail() {
@@ -298,17 +488,26 @@ function loadDetailSoon() {
   detailTimer = setTimeout(loadDetail, 800);
 }
 
+let detailDeferred = false; // a redraw waiting for you to leave a text field
+
 function renderDetail() {
   const main = document.getElementById('detail');
+  const content = document.getElementById('detail-content');
+  // Redrawing would throw away what you're typing; catch up when you leave the field.
+  const typing = content.contains(document.activeElement) && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+  if (typing) { detailDeferred = true; return; }
+  detailDeferred = false;
   const s = sessions.find((x) => x.id === selectedId);
   const scroll = main.scrollTop;
-  main.replaceChildren();
+  content.replaceChildren();
+  renderComposer(s);
+  if (newSessionOpen) { content.append(newSessionForm()); return; }
   if (!s) {
-    main.append(h('p', { class: 'empty' }, selectedId ? 'This session is no longer in the list.' : 'Select a session to see what it is doing.'));
+    content.append(h('p', { class: 'empty' }, selectedId ? 'This session is no longer in the list.' : 'Select a session to see what it is doing.'));
     return;
   }
   const d = detail?.id === s.id ? detail : null;
-  add(main,
+  add(content,
     h('header', { class: 'detail-head' },
       h('div', { class: 'detail-title' },
         h('span', { class: `pill ${s.status}` }, STATUS_LABEL[s.status] ?? s.status),
@@ -330,13 +529,18 @@ function renderDetail() {
 }
 
 function needSection(s) {
-  if (s.permissions.length) {
+  const questions = s.permissions.filter((p) => p.questions);
+  const requests = s.permissions.filter((p) => !p.questions);
+  if (questions.length) return h('section', { class: 'need-box' }, h('h2', {}, 'Question for you'), questions.map(questionForm));
+  if (requests.length) {
     return h('section', { class: 'need-box' },
-      h('h2', {}, s.permissions.length > 1 ? `${s.permissions.length} permission requests` : 'Permission needed'),
-      s.permissions.map((p) => h('div', { class: 'perm' },
+      h('h2', {}, requests.length > 1 ? `${requests.length} permission requests` : 'Permission needed'),
+      requests.map((p) => h('div', { class: 'perm' },
         h('div', { class: 'perm-head' }, h('strong', {}, p.summary), permissionActions(p)),
         h('pre', { class: 'perm-input' }, p.input))),
-      h('p', { class: 'hint' }, 'You can also answer in the terminal. Whichever answer comes first is used.'));
+      h('p', { class: 'hint' }, s.dashboard
+        ? 'This session was started here, so it waits for your answer on this page.'
+        : 'You can also answer in the terminal. Whichever answer comes first is used.'));
   }
   if (!s.need) return null;
   const hint = s.need.kind !== 'permission' ? 'Answer it in this session’s Warp tab.'

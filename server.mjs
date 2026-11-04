@@ -5,7 +5,8 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { DashboardSessions } from './agents.mjs';
 import { PendingPermissions } from './permissions.mjs';
 import { applyHook } from './sessions.mjs';
 import { parseTranscript } from './transcript.mjs';
@@ -38,6 +39,29 @@ const transcripts = new Map(); // transcript path -> { mtimeMs, size, data }
 const clients = new Set();     // open SSE responses
 const pending = new PendingPermissions();
 const hidden = new Set();      // session ids removed from the list; back on their next event
+const dashboard = new DashboardSessions({
+  decide: decideInPage,
+  event: (ev) => { const s = applyHook(sessions, ev, Date.now()); if (s) { pending.settle(ev); refreshSoon(s.id); } broadcast(); },
+  changed: () => broadcast(),
+});
+
+// A dashboard session's permission prompt or question: shown in the page with no time limit
+// (there's no terminal to fall back to), answered by a click.
+function decideInPage(sessionId, tool, input, signal) {
+  return new Promise((resolve) => {
+    const ev = { session_id: sessionId, tool_name: tool, tool_input: input };
+    const id = pending.add(ev, (decision) => {
+      broadcast();
+      if (decision?.answers) resolve({ behavior: 'allow', updatedInput: { ...input, answers: decision.answers } });
+      else if (decision === 'allow') resolve({ behavior: 'allow', updatedInput: input });
+      else resolve({ behavior: 'deny', message: decision === 'deny' ? 'Denied from Claude Monitor' : 'No answer was given' });
+    });
+    signal?.addEventListener('abort', () => { pending.drop(id); broadcast(); }, { once: true });
+    // Same state change a terminal session gets from its hooks.
+    applyHook(sessions, { ...ev, hook_event_name: tool === 'AskUserQuestion' ? 'PreToolUse' : 'PermissionRequest' }, Date.now());
+    broadcast();
+  });
+}
 
 // --- saved state ---------------------------------------------------------------------------
 
@@ -57,6 +81,7 @@ async function loadState() {
     }
   }
   for (const id of saved.hidden ?? []) if (SESSION_ID.test(id)) hidden.add(id);
+  for (const [id, cwd] of saved.owned ?? []) if (SESSION_ID.test(id) && typeof cwd === 'string') dashboard.owned.set(id, cwd);
 }
 
 let saveTimer = null;
@@ -67,6 +92,7 @@ function saveSoon() {
     const state = {
       sessions: [...sessions.values()].map((s) => Object.fromEntries(SAVED_FIELDS.map((k) => [k, s[k] ?? null]))),
       hidden: [...hidden].filter((id) => sessions.has(id)), // others have aged out of the list anyway
+      owned: [...dashboard.owned].filter(([id]) => sessions.has(id)),
     };
     const tmp = `${STATE_FILE}.tmp`;
     try {
@@ -176,6 +202,8 @@ function summary(s) {
     transcriptUpdatedAt: t?.updatedAt ?? null,
     context,
     cost: costs.get(s.id) ?? null,
+    // Started here, so it takes prompts from the page; `live` is whether it's running right now.
+    dashboard: dashboard.owned.has(s.id) ? { live: dashboard.isLive(s.id) } : null,
   };
 }
 
@@ -236,7 +264,9 @@ function hookDecision(decision) {
 // Holds a PermissionRequest hook open until a click, a terminal answer, or the wait runs out.
 // An empty 200 means "no decision": the terminal prompt carries on as if the monitor weren't there.
 function holdPermission(ev, res) {
-  if (!clients.size) return res.writeHead(200).end(); // no dashboard open: don't hold anything
+  // No dashboard open: don't hold anything. Questions aren't Allow/Deny: a dashboard session's
+  // come through decideInPage, a terminal session's are answered in the terminal.
+  if (!clients.size || ev.tool_name === 'AskUserQuestion') return res.writeHead(200).end();
   let timer;
   const id = pending.add(ev, (decision) => {
     clearTimeout(timer);
@@ -300,10 +330,56 @@ async function handle(req, res) {
     return sendJson(res, { ok: true });
   }
 
+  if (req.method === 'POST' && pathname === '/api/new-session') {
+    const { cwd, prompt } = await readJson(req, 200_000);
+    const dir = typeof cwd === 'string' ? resolvePath(cwd.trim().replace(/^~(?=\/|$)/, homedir())) : '';
+    if (!isAbsolute(dir) || !(await stat(dir).then((st) => st.isDirectory(), () => false))) {
+      throw new HttpError(400, 'That folder doesn’t exist');
+    }
+    if (typeof prompt !== 'string' || !prompt.trim()) throw new HttpError(400, 'Type a first prompt');
+    let id;
+    try { id = await dashboard.start({ cwd: dir, prompt }); } catch (err) { throw new HttpError(502, err.message); }
+    // Hooks report the transcript path too; this covers the moments before they do (or no hooks).
+    const s = sessions.get(id);
+    if (s) s.transcriptPath ??= join(PROJECTS_DIR, dir.replace(/[^a-zA-Z0-9]/g, '-'), `${id}.jsonl`);
+    broadcast();
+    return sendJson(res, { id, auth: dashboard.lastAuth });
+  }
+
+  const act = pathname.match(/^\/api\/sessions\/([\w-]+)\/(send|interrupt|end)$/);
+  if (req.method === 'POST' && act) {
+    const [, id, action] = act;
+    if (!dashboard.owned.has(id)) throw new HttpError(404, 'Only sessions started here take prompts from the page');
+    if (action === 'send') {
+      const { text } = await readJson(req, 200_000);
+      if (typeof text !== 'string' || !text.trim()) throw new HttpError(400, 'Type a message');
+      try { await dashboard.send(id, text); } catch (err) { throw new HttpError(502, err.message); }
+    } else if (action === 'interrupt') {
+      await dashboard.interrupt(id);
+    } else {
+      dashboard.end(id);
+    }
+    broadcast();
+    return sendJson(res, { ok: true });
+  }
+
   const decide = pathname.match(/^\/api\/permissions\/([\w-]+)$/);
   if (req.method === 'POST' && decide) {
-    const { decision } = await readJson(req, 1000);
-    if (decision !== 'allow' && decision !== 'deny') throw new HttpError(400, 'decision must be allow or deny');
+    const body = await readJson(req, 100_000);
+    const item = pending.get(decide[1]);
+    if (!item) throw new HttpError(409, 'Already answered');
+    let decision = body.decision;
+    if (body.answers !== undefined) {
+      // Answers to Claude's question: one string per question, keyed by the question's text.
+      const questions = new Set((item.questions ?? []).map((q) => q.question));
+      const entries = Object.entries(body.answers ?? {});
+      if (!questions.size || !entries.length || !entries.every(([q, a]) => questions.has(q) && typeof a === 'string')) {
+        throw new HttpError(400, 'answers must match the questions');
+      }
+      decision = { answers: body.answers };
+    } else if (decision !== 'allow' && decision !== 'deny') {
+      throw new HttpError(400, 'decision must be allow or deny');
+    }
     const sessionId = pending.resolve(decide[1], decision);
     if (!sessionId) throw new HttpError(409, 'Already answered');
     const s = sessions.get(sessionId);
@@ -326,7 +402,9 @@ async function handle(req, res) {
     const settings = await readFile(join(homedir(), '.claude', 'settings.json'), 'utf8').then(JSON.parse).catch(() => ({}));
     const permissionHook = (settings.hooks?.PermissionRequest ?? [])
       .some((g) => (g.hooks ?? []).some((h) => String(h.command ?? '').includes('/permission?from=claude-monitor')));
-    return sendJson(res, { permissionHook });
+    // Folders of recent sessions, offered when starting a new one.
+    const folders = [...new Set([...sessions.values()].sort((a, b) => b.lastEventAt - a.lastEventAt).map((s) => s.cwd).filter(Boolean))];
+    return sendJson(res, { permissionHook, auth: dashboard.lastAuth, folders: folders.slice(0, 30) });
   }
 
   if (pathname === '/events') {
@@ -374,6 +452,11 @@ await scanStatusDir();
 setInterval(scanStatusDir, 2000);
 await loadState();
 await loadRecentSessions();
+
+// Stop dashboard sessions' Claude processes with the server; they resume on your next message.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => { dashboard.endAll(); process.exit(0); });
+}
 
 server.on('error', (err) => {
   console.error(err.code === 'EADDRINUSE'
