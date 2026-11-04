@@ -30,6 +30,8 @@ export function applyHook(sessions, ev, now) {
       if (ev.tool_name === 'AskUserQuestion') set(s, 'needs_you', { kind: 'question', message: questionText(ev.tool_input) });
       else set(s, 'working');
       s.activity = describeTool(ev.tool_name, ev.tool_input);
+      // Hooks inside a subagent carry its id and type.
+      if (ev.agent_id) s.activity = `Subagent (${ev.agent_type ?? 'agent'}): ${s.activity}`;
       break;
     case 'PostToolUse': case 'PostToolUseFailure': case 'PermissionDenied':
       set(s, 'working', null, s.activity);

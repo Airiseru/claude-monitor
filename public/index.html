@@ -9,7 +9,7 @@
 <body>
   <header class="top">
     <div class="top-left">
-      <button id="toggle-sidebar" class="btn" aria-controls="sessions">Hide sessions</button>
+      <button id="toggle-sidebar" class="btn" aria-controls="sidebar">Hide sessions</button>
       <span class="brand">Claude Monitor</span>
     </div>
     <div class="top-right">
@@ -18,7 +18,15 @@
     </div>
   </header>
   <div class="layout">
-    <nav id="sessions" class="sessions" aria-label="Sessions"></nav>
+    <aside id="sidebar" class="sidebar">
+      <!-- Outside the list, which redraws on every update, so typing here isn't interrupted. -->
+      <div class="sidebar-tools">
+        <button id="new-session" class="btn new-session">+ New session</button>
+        <input id="search" class="input" type="search" placeholder="Search titles, folders, prompts, replies" aria-label="Search sessions">
+        <select id="project" class="input" aria-label="Filter by project"><option value="">All projects</option></select>
+      </div>
+      <nav id="sessions" class="sessions" aria-label="Sessions"></nav>
+    </aside>
     <main id="detail" class="detail">
       <div id="detail-content"></div>
       <!-- Built once and only shown/hidden, so what you type survives live updates. -->

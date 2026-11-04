@@ -65,16 +65,17 @@ button { font: inherit; color: inherit; }
 .top-left, .top-right { display: flex; align-items: center; gap: 12px; }
 .top .btn { padding: 3px 10px; font-weight: 550; }
 #toggle-sidebar.alert { color: var(--needs); border-color: var(--needs); }
-.sidebar-hidden .sessions { display: none; }
+.sidebar-hidden .sidebar { display: none; }
 .conn { font-size: 12px; color: var(--muted); }
 .conn.live::before { content: "● "; color: var(--waiting); }
 .conn.down { color: var(--needs); }
 
 .layout { flex: 1; display: flex; min-height: 0; }
-.sessions {
-  width: 380px; flex: none; overflow-y: auto; padding: 8px 10px 24px;
-  border-right: 1px solid var(--border);
-}
+.sidebar { width: 380px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--border); min-height: 0; }
+.sidebar-tools { display: flex; flex-direction: column; gap: 6px; padding: 10px 10px 4px; }
+.sidebar-tools .input { padding: 5px 9px; font-size: 13px; }
+.sessions { flex: 1; min-height: 0; overflow-y: auto; padding: 0 10px 24px; }
+.filter-note { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--muted); margin: 8px 6px 0; }
 .detail { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 
 .section {
@@ -198,7 +199,7 @@ button { font: inherit; color: inherit; }
 }
 
 /* New session form, reply box, and Claude's questions (dashboard sessions) */
-.new-session { width: 100%; margin: 4px 0 2px; padding: 7px 10px; font-weight: 600; }
+.new-session { width: 100%; padding: 7px 10px; font-weight: 600; }
 .new-session.selected { border-color: var(--accent); }
 .new-form { max-width: 720px; display: flex; flex-direction: column; gap: 6px; }
 .new-form h1 { font-size: 20px; margin: 0 0 4px; }
@@ -243,6 +244,20 @@ textarea.input, .composer textarea { resize: vertical; }
 .option .muted { font-size: 12px; }
 .option.on { border-color: var(--waiting); box-shadow: 0 0 0 1px var(--waiting); }
 .option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.card.starting { cursor: default; opacity: .85; }
+.detail-title .link { font-size: 12.5px; }
+.rename { display: flex; gap: 8px; align-items: center; flex: 1; flex-wrap: wrap; }
+.rename-input { flex: 1; min-width: 200px; font-size: 17px; font-weight: 650; }
+
+/* A subagent's work, folded under the Agent call in the timeline */
+.subagent { width: 100%; margin-top: 2px; }
+.subagent-body { margin: 6px 0 4px; padding: 8px 10px; border-left: 2px solid var(--border); }
+.subagent-body summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+.sub-prompt { white-space: pre-wrap; font-size: 12.5px; margin: 6px 0; max-height: 14em; overflow-y: auto; }
+.sub-tools { margin: 6px 0; }
+.sub-tools .tl { padding: 3px 0; font-size: 12.5px; }
+.sub-h { font-size: 12.5px; margin: 10px 0 4px; }
 
 /* Rendered Markdown in Claude's replies */
 .md > :first-child { margin-top: 0; }
@@ -326,7 +341,9 @@ textarea.input, .composer textarea { resize: vertical; }
 
 @media (max-width: 760px) {
   .layout { flex-direction: column; overflow-y: auto; }
-  .sessions { width: 100%; border-right: 0; border-bottom: 1px solid var(--border); overflow: visible; padding: 8px 16px 16px; }
+  .sidebar { width: 100%; border-right: 0; border-bottom: 1px solid var(--border); }
+  .sidebar-tools { padding: 10px 16px 4px; }
+  .sessions { overflow: visible; padding: 0 16px 16px; }
   .detail { overflow: visible; }
   #detail-content { overflow: visible; padding: 16px; }
   .composer { position: sticky; bottom: 0; padding: 10px 16px 14px; }

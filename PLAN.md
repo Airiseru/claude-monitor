@@ -4,9 +4,7 @@ What's left to build, and the findings any future change has to respect. Everyth
 
 ## Ideas not built yet
 
-1. **Search and filter sessions** by project, branch, or text (prompts, replies, file names). Worth it once more than about 10 sessions a day is normal. The data is already in the session list and transcripts, so this is page-only work.
-2. **Subagent activity.** Work done by subagents is stored in separate transcript files (`<session>/subagents/…`) that the parser skips, so a long stretch of "Working" with an empty timeline is usually a subagent. Show which subagents ran, what each was asked, and their tool calls, nested under the parent session's timeline.
-3. **Jump to the exact Warp tab.** Today "Go to Warp" only brings Warp to the front. Warp's tab-control CLI (`warpctrl tab list` / `tab activate`) would do it, but it's switched off on Warp Stable: as of 2026-11-04, build 0.2026.10.14 has no Settings → Scripting page, and running the binary as `warpctrl` doesn't enter control mode. Revisit when Warp turns it on for Stable; matching a session to its tab needs the tab's folder or title from `tab list`.
+1. **Jump to the exact Warp tab.** Today "Go to Warp" only brings Warp to the front. Warp's tab-control CLI (`warpctrl tab list` / `tab activate`) would do it, but it's switched off on Warp Stable: as of 2026-11-04, build 0.2026.10.14 has no Settings → Scripting page, and running the binary as `warpctrl` doesn't enter control mode. Revisit when Warp turns it on for Stable; matching a session to its tab needs the tab's folder or title from `tab list`.
 
 ## Findings and constraints
 
@@ -18,6 +16,7 @@ What's left to build, and the findings any future change has to respect. Everyth
 - Most prompts never reach you: over 14 days, about 16 of roughly 4,100 permission decisions were yours, compared with 43 questions and 621 "finished, waiting" moments.
 
 **Transcripts**
+- A subagent's transcript is `<session>/subagents/agent-<id>.jsonl`, every entry marked as a sidechain, plus `agent-<id>.meta.json` with its type, description, `finished`, and the parent's Agent `toolUseId`. That id is how its work is attached to the parent's timeline.
 - `~/.claude/projects/<dir>/<session>.jsonl` is an internal format that changes between versions. Only the detail view, titles, and Claude's reply depend on it, and the parser skips lines it doesn't understand. Status, context %, cost, and permissions come from hooks and the status line.
 - A reply is split over several entries, one content block each, each carrying a `stop_reason`. The reply to a prompt is the text after the last tool call, and `end_turn` marks a finished turn.
 
@@ -25,7 +24,9 @@ What's left to build, and the findings any future change has to respect. Everyth
 - They run your installed `~/.local/bin/claude` with your Claude login. The monitor removes `ANTHROPIC_API_KEY` from their environment, and the page shows which credential the SDK reports. You chose this on 2026-11-04 for **personal use only**. Anthropic's terms say products built on the SDK should use an API key, so switch to one before sharing the monitor with anyone.
 - Keep `@anthropic-ai/claude-agent-sdk` pinned to the version matching the installed CLI (0.3.318 ↔ 2.1.318). It's installed with `--omit=optional`, so the SDK uses the installed `claude` instead of a bundled copy.
 - Never resume a session that's open in a terminal. Without forking, both write into one transcript. That's why only sessions started from the page take replies.
-- A server restart stops their Claude processes. Your next message resumes them.
+- A server restart stops their Claude processes. Your next message resumes them, with the model they were started on.
+- The model list comes from `supportedModels()` on a Claude Code process that's never sent a prompt, loads no settings, and saves no transcript (no usage, no stray session).
+- Rename writes one `custom-title` line to the transcript (the SDK's `renameSession`, as `/rename` does). It works for any session, Warp ones included.
 
 **Security**
 - The server listens on 127.0.0.1 only and checks the `Host` header. Every page action (Allow/Deny, answers, new session, send, remove, Go to Warp) needs the per-run token and a same-origin `Origin`. Hook endpoints reject requests that carry an `Origin`.

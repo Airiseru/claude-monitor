@@ -6,7 +6,7 @@ import http from 'node:http';
 import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path';
-import { DashboardSessions } from './agents.mjs';
+import { DashboardSessions, listModels, setSessionTitle } from './agents.mjs';
 import { PendingPermissions } from './permissions.mjs';
 import { applyHook } from './sessions.mjs';
 import { parseTranscript } from './transcript.mjs';
@@ -81,7 +81,10 @@ async function loadState() {
     }
   }
   for (const id of saved.hidden ?? []) if (SESSION_ID.test(id)) hidden.add(id);
-  for (const [id, cwd] of saved.owned ?? []) if (SESSION_ID.test(id) && typeof cwd === 'string') dashboard.owned.set(id, cwd);
+  for (const [id, o] of saved.owned ?? []) {
+    const entry = typeof o === 'string' ? { cwd: o, model: null } : o; // older saves held just the folder
+    if (SESSION_ID.test(id) && typeof entry?.cwd === 'string') dashboard.owned.set(id, { cwd: entry.cwd, model: entry.model ?? null });
+  }
 }
 
 let saveTimer = null;
@@ -106,13 +109,42 @@ function saveSoon() {
 
 // --- transcripts ---------------------------------------------------------------------------
 
-async function readTranscript(path) {
+async function readTranscript(path, options) {
   const st = await stat(path);
   const hit = transcripts.get(path);
   if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.data;
-  const data = parseTranscript(await readFile(path, 'utf8'));
+  const data = parseTranscript(await readFile(path, 'utf8'), options);
   transcripts.set(path, { mtimeMs: st.mtimeMs, size: st.size, data });
   return data;
+}
+
+// A session's subagents: <session>/subagents/agent-<id>.jsonl plus a .meta.json that names the
+// parent's Agent tool call that started it.
+async function readSubagents(transcriptPath) {
+  const dir = join(transcriptPath.replace(/\.jsonl$/, ''), 'subagents');
+  const out = [];
+  for (const file of await readdir(dir).catch(() => [])) {
+    const agentId = file.match(/^agent-([\w-]+)\.meta\.json$/)?.[1];
+    if (!agentId) continue;
+    const meta = await readFile(join(dir, file), 'utf8').then(JSON.parse).catch(() => null);
+    const t = await readTranscript(join(dir, `agent-${agentId}.jsonl`), { sidechain: true }).catch(() => null);
+    if (!meta || !t) continue;
+    const tools = t.timeline.filter((i) => i.kind === 'tool');
+    out.push({
+      agentId,
+      toolUseId: meta.toolUseId ?? null,
+      type: meta.agentType ?? null,
+      description: meta.description ?? null,
+      finished: Boolean(meta.finished),
+      prompt: t.timeline.find((i) => i.kind === 'prompt')?.text ?? null,
+      startedAt: t.startedAt,
+      updatedAt: t.updatedAt,
+      toolCount: tools.length,
+      tools: tools.slice(-200),
+      reply: t.lastResponse,
+    });
+  }
+  return out.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
 }
 
 // Hooks fire before the transcript is written, so re-read it shortly after the last event.
@@ -353,19 +385,36 @@ async function handle(req, res) {
   }
 
   if (req.method === 'POST' && pathname === '/api/new-session') {
-    const { cwd, prompt } = await readJson(req, 200_000);
+    const { cwd, prompt, model = null } = await readJson(req, 200_000);
+    if (model != null && !(await listModels().catch(() => [])).some((m) => m.value === model)) {
+      throw new HttpError(400, 'Unknown model');
+    }
     const dir = typeof cwd === 'string' ? resolvePath(cwd.trim().replace(/^~(?=\/|$)/, homedir())) : '';
     if (!isAbsolute(dir) || !(await stat(dir).then((st) => st.isDirectory(), () => false))) {
       throw new HttpError(400, 'That folder doesn’t exist');
     }
     if (typeof prompt !== 'string' || !prompt.trim()) throw new HttpError(400, 'Type a first prompt');
     let id;
-    try { id = await dashboard.start({ cwd: dir, prompt }); } catch (err) { throw new HttpError(502, err.message); }
+    try { id = await dashboard.start({ cwd: dir, prompt, model }); } catch (err) { throw new HttpError(502, err.message); }
     // Hooks report the transcript path too; this covers the moments before they do (or no hooks).
     const s = sessions.get(id);
     if (s) s.transcriptPath ??= join(PROJECTS_DIR, dir.replace(/[^a-zA-Z0-9]/g, '-'), `${id}.jsonl`);
     broadcast();
     return sendJson(res, { id, auth: dashboard.lastAuth });
+  }
+
+  // Rename works for any session: it writes a title line to the transcript, as /rename does.
+  const ren = pathname.match(/^\/api\/sessions\/([\w-]+)\/rename$/);
+  if (req.method === 'POST' && ren) {
+    const s = sessions.get(ren[1]);
+    if (!s?.transcriptPath) throw new HttpError(404, 'Not found');
+    const { title } = await readJson(req, 10_000);
+    const clean = typeof title === 'string' ? title.replace(/\s+/g, ' ').trim() : '';
+    if (!clean || clean.length > 200) throw new HttpError(400, 'Title must be 1–200 characters');
+    try { await setSessionTitle(s.id, clean); } catch (err) { throw new HttpError(502, err.message); }
+    await readTranscript(s.transcriptPath).catch(() => {});
+    broadcast();
+    return sendJson(res, { ok: true, title: clean });
   }
 
   const act = pathname.match(/^\/api\/sessions\/([\w-]+)\/(send|interrupt|end)$/);
@@ -426,7 +475,8 @@ async function handle(req, res) {
       .some((g) => (g.hooks ?? []).some((h) => String(h.command ?? '').includes('/permission?from=claude-monitor')));
     // Folders of recent sessions, offered when starting a new one.
     const folders = [...new Set([...sessions.values()].sort((a, b) => b.lastEventAt - a.lastEventAt).map((s) => s.cwd).filter(Boolean))];
-    return sendJson(res, { permissionHook, auth: dashboard.lastAuth, folders: folders.slice(0, 30) });
+    const models = await listModels().catch((err) => { console.error('Could not list models:', err.message); return []; });
+    return sendJson(res, { permissionHook, auth: dashboard.lastAuth, folders: folders.slice(0, 30), models });
   }
 
   if (pathname === '/events') {
@@ -446,7 +496,7 @@ async function handle(req, res) {
     const t = await readTranscript(s.transcriptPath);
     return sendJson(res, {
       ...summary(s), lastResponse: t.lastResponse, lastResponseAt: t.lastResponseAt, turnEnded: t.turnEnded,
-      timeline: t.timeline.slice(-500), files: [...t.files.values()],
+      timeline: t.timeline.slice(-500), files: [...t.files.values()], subagents: await readSubagents(s.transcriptPath),
     });
   }
 

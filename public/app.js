@@ -27,9 +27,13 @@ const picks = new Map();     // question request id -> { [question]: Set of pick
 const others = new Map();    // question request id -> { [question]: typed answer }
 const token = fetch('/api/token').then((r) => r.json()).then((d) => d.token);
 let permissionHookInstalled = true; // refreshed from /api/setup whenever a prompt can't be answered here
-let setup = { auth: null, folders: [] }; // from /api/setup: login in use, recent folders
+let setup = { auth: null, folders: [], models: [] }; // from /api/setup: login in use, recent folders, models
 let newSessionOpen = false;
-const newDraft = { cwd: '', prompt: '', error: null, busy: false };
+const newDraft = { cwd: '', prompt: '', model: 'default', error: null };
+let starting = null;         // { cwd, prompt, model } while a new session spins up
+let renaming = null;         // { id, value, error, busy } while a title is being edited
+const filter = { text: '', project: '' }; // sidebar search and project filter
+const openAgents = new Set(); // Agent tool-call ids whose subagent work is expanded
 
 // --- helpers -------------------------------------------------------------------------------
 
@@ -276,16 +280,59 @@ document.getElementById('detail-content').addEventListener('focusout', () => {
 
 // --- session list --------------------------------------------------------------------------
 
+// Every word typed must appear somewhere in the session's title, folder, branch, last prompt,
+// Claude's reply, or what it's doing; the project filter matches the folder exactly.
+function matches(s) {
+  if (filter.project && s.cwd !== filter.project) return false;
+  const words = filter.text.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return true;
+  const text = [titleOf(s), s.cwd, s.branch, s.lastPrompt, s.lastResponse && toPlainText(s.lastResponse), s.need?.message, s.activity]
+    .filter(Boolean).join(' ').toLowerCase();
+  return words.every((w) => text.includes(w));
+}
+
+let projectKey = null; // rebuild the project menu only when the set of folders changes
+function renderProjectOptions() {
+  const folders = [...new Set(sessions.map((s) => s.cwd).filter(Boolean))].sort((a, b) => folder(a).localeCompare(folder(b)));
+  if (filter.project && !folders.includes(filter.project)) folders.push(filter.project);
+  const key = folders.join('\n');
+  if (key === projectKey) return;
+  projectKey = key;
+  const select = document.getElementById('project');
+  select.replaceChildren(h('option', { value: '' }, 'All projects'), folders.map((f) => h('option', { value: f }, tilde(f))));
+  select.value = filter.project;
+}
+
+function startingCard() {
+  return h('div', { class: 'card-group' },
+    h('div', { class: 'card working starting', 'aria-live': 'polite' },
+      h('div', { class: 'card-top' },
+        h('span', { class: 'dot', 'aria-hidden': 'true' }),
+        h('span', { class: 'card-title' }, starting.prompt.slice(0, 70)),
+        h('span', { class: 'ago' }, 'starting')),
+      h('div', { class: 'card-meta' }, [folder(starting.cwd), modelName(starting.model)].filter(Boolean).join(' · ')),
+      h('div', { class: 'card-line' }, 'Starting Claude Code…')));
+}
+
 function renderList() {
+  document.getElementById('new-session').classList.toggle('selected', newSessionOpen);
+  renderProjectOptions();
   const nav = document.getElementById('sessions');
-  nav.replaceChildren(h('button', {
-    class: `btn new-session${newSessionOpen ? ' selected' : ''}`, onclick: openNewSession,
-  }, '+ New session'));
+  nav.replaceChildren();
+  const shown = sessions.filter(matches);
+  if (filter.text || filter.project) {
+    nav.append(h('div', { class: 'filter-note' },
+      `Showing ${shown.length} of ${sessions.length}`,
+      h('button', { class: 'link', onclick: clearFilter }, 'Clear filters')));
+  }
+  if (starting) nav.append(h('h2', { class: 'section working' }, h('span', { class: 'section-label' }, 'Starting')), startingCard());
   if (!sessions.length) {
     nav.append(h('p', { class: 'empty' }, 'No sessions in the last 24 hours.'));
+  } else if (!shown.length) {
+    nav.append(h('p', { class: 'empty' }, 'No sessions match.'));
   }
   for (const [status, label] of SECTIONS) {
-    const group = sessions.filter((s) => s.status === status).sort((a, b) => b.lastEventAt - a.lastEventAt);
+    const group = shown.filter((s) => s.status === status).sort((a, b) => b.lastEventAt - a.lastEventAt);
     if (!group.length) continue;
     nav.append(h('h2', { class: `section ${status}` },
       h('span', { class: 'section-label' }, label),
@@ -335,6 +382,17 @@ function select(id) {
   if (id) loadDetail();
   document.getElementById('detail-content').scrollTop = 0;
 }
+
+function clearFilter() {
+  filter.text = filter.project = '';
+  document.getElementById('search').value = '';
+  document.getElementById('project').value = '';
+  renderList();
+}
+
+document.getElementById('new-session').addEventListener('click', openNewSession);
+document.getElementById('search').addEventListener('input', (e) => { filter.text = e.target.value; renderList(); });
+document.getElementById('project').addEventListener('change', (e) => { filter.project = e.target.value; renderList(); });
 
 // --- toolbar: sidebar and notifications ----------------------------------------------------
 
@@ -398,8 +456,8 @@ const versionOf = (s) => (s ? `${s.lastEventAt}|${s.transcriptUpdatedAt}` : null
 
 async function checkSetup() {
   try {
-    const { permissionHook, auth, folders } = await (await fetch('/api/setup')).json();
-    setup = { auth, folders: folders ?? [] };
+    const { permissionHook, auth, folders, models } = await (await fetch('/api/setup')).json();
+    setup = { auth, folders: folders ?? [], models: models ?? [] };
     if (permissionHook !== permissionHookInstalled) { permissionHookInstalled = permissionHook; renderDetail(); }
   } catch {
     // Server unreachable: the connection indicator already says so.
@@ -418,23 +476,35 @@ async function openNewSession() {
   document.getElementById('new-prompt')?.focus();
 }
 
+// The form closes at once and a "Starting" card stands in until Claude Code is up; on failure
+// the form comes back with what you typed and the error.
 async function startNewSession(e) {
   e.preventDefault();
   document.activeElement?.blur(); // leaving the field lets the page redraw (see renderDetail)
-  newDraft.busy = true;
+  starting = { cwd: newDraft.cwd, prompt: newDraft.prompt, model: newDraft.model };
   newDraft.error = null;
-  renderDetail();
+  newSessionOpen = false;
+  render();
   try {
-    const res = await post('/api/new-session', { cwd: newDraft.cwd, prompt: newDraft.prompt });
+    const res = await post('/api/new-session', {
+      cwd: starting.cwd, prompt: starting.prompt, model: starting.model === 'default' ? null : starting.model,
+    });
     const text = await res.text(); // errors come back as plain text
     if (!res.ok) throw new Error(text || `Error ${res.status}`);
-    Object.assign(newDraft, { prompt: '', busy: false });
+    starting = null;
+    newDraft.prompt = '';
     select(JSON.parse(text).id);
   } catch (err) {
-    Object.assign(newDraft, { busy: false, error: err.message });
-    renderDetail();
+    starting = null;
+    newDraft.error = err.message;
+    newSessionOpen = true;
+    render();
   }
 }
+
+const modelName = (value) => (value && value !== 'default'
+  ? setup.models.find((m) => m.value === value)?.displayName ?? value
+  : null);
 
 // What credential dashboard sessions use, in words (SDK apiKeySource; 'none' means no API key,
 // so Claude Code uses your login).
@@ -461,6 +531,23 @@ async function chooseFolder() {
 
 const tilde = (path) => path.replace(/^\/Users\/[^/]+/, '~');
 
+// The models your account offers, as Claude Code lists them ("Default" is your usual model).
+function modelSelect() {
+  const options = setup.models.length ? setup.models : [{ value: 'default', displayName: 'Default', description: '' }];
+  const select = h('select', { id: 'new-model', class: 'input', onchange: (e) => { newDraft.model = e.target.value; } },
+    options.map((m) => h('option', { value: m.value }, m.description ? `${m.displayName} — ${m.description}` : m.displayName)));
+  select.value = options.some((m) => m.value === newDraft.model) ? newDraft.model : options[0].value;
+  newDraft.model = select.value;
+  return h('span', { class: 'select-wrap' }, select);
+}
+
+function startingView() {
+  return h('section', { class: 'block' },
+    h('div', { class: 'detail-title' }, h('span', { class: 'pill working' }, 'Starting'), h('h1', {}, 'Starting Claude Code…')),
+    h('p', { class: 'meta' }, [tilde(starting.cwd), modelName(starting.model) ?? 'default model'].join('  ·  ')),
+    h('h2', {}, 'First prompt'), h('p', { class: 'prompt' }, starting.prompt));
+}
+
 function newSessionForm() {
   const folders = [...new Set([newDraft.cwd, ...setup.folders].filter(Boolean))];
   const cwdSelect = h('select', { id: 'new-cwd', class: 'input', required: true, onchange: (e) => { newDraft.cwd = e.target.value; } },
@@ -480,11 +567,13 @@ function newSessionForm() {
       h('span', { class: 'select-wrap' }, cwdSelect),
       h('button', { type: 'button', class: 'btn', disabled: newDraft.choosing, onclick: chooseFolder },
         newDraft.choosing ? 'Choosing… (see the dialog)' : 'Choose in Finder…')),
+    h('label', { for: 'new-model' }, 'Model'),
+    modelSelect(),
     h('label', { for: 'new-prompt' }, 'First prompt'),
     promptInput,
     newDraft.error && h('p', { class: 'form-error', role: 'alert' }, newDraft.error),
     h('div', { class: 'detail-actions' },
-      h('button', { type: 'submit', class: 'btn allow', disabled: newDraft.busy }, newDraft.busy ? 'Starting…' : 'Start session'),
+      h('button', { type: 'submit', class: 'btn allow' }, 'Start session'),
       h('button', { type: 'button', class: 'btn', onclick: () => { newSessionOpen = false; render(); } }, 'Cancel')));
 }
 
@@ -523,6 +612,7 @@ function renderDetail() {
   content.replaceChildren();
   renderComposer(s);
   if (newSessionOpen) { content.append(newSessionForm()); return; }
+  if (starting && !selectedId) { content.append(startingView()); return; }
   if (!s) {
     content.append(h('p', { class: 'empty' }, selectedId ? 'This session is no longer in the list.' : 'Select a session to see what it is doing.'));
     return;
@@ -532,7 +622,8 @@ function renderDetail() {
     h('header', { class: 'detail-head' },
       h('div', { class: 'detail-title' },
         h('span', { class: `pill ${s.status}` }, STATUS_LABEL[s.status] ?? s.status),
-        h('h1', {}, titleOf(s))),
+        renaming?.id === s.id ? renameForm(s)
+          : [h('h1', {}, titleOf(s)), h('button', { class: 'link', onclick: () => startRename(s) }, 'Rename')]),
       h('div', { class: 'meta' }, [s.cwd && s.cwd.replace(/^\/Users\/[^/]+/, '~'), s.branch, s.model].filter(Boolean).join('  ·  ')),
       stats(s, true),
       h('div', { class: 'detail-actions' },
@@ -540,6 +631,7 @@ function renderDetail() {
         !LIVE.has(s.status) && h('button', { class: 'btn', onclick: () => removeSessions([s.id]) }, 'Remove from list'))),
     needSection(s),
     s.status === 'working' && s.activity && h('p', { class: 'now' }, h('strong', {}, 'Now: '), s.activity),
+    runningSubagents(d),
     s.lastPrompt && h('section', { class: 'block' }, h('h2', {}, 'Last prompt'), h('p', { class: 'prompt' }, s.lastPrompt)),
     d?.lastResponse && replySection(s, d),
     !d ? h('p', { class: 'empty' }, 'Loading…')
@@ -625,7 +717,72 @@ function timelineSection(d) {
               : it.kind === 'command' || it.kind === 'note' ? [h('span', { class: 'tag' }, it.kind === 'command' ? 'Command' : 'Note'), h('span', { class: 'tl-text muted' }, it.text)]
               : [h('span', { class: 'tag' }, it.tool), h('span', { class: 'tl-text' }, it.text),
                 it.error && h('span', { class: 'tag err' }, 'failed'),
-                it.command && it.command !== it.text && h('code', { class: 'cmd' }, it.command)])))));
+                it.command && it.command !== it.text && h('code', { class: 'cmd' }, it.command),
+                subagentWork(d.subagents?.find((a) => a.toolUseId && a.toolUseId === it.id))])))));
+}
+
+// What a subagent did, folded under the Agent call that started it.
+function subagentWork(a) {
+  if (!a) return null;
+  const open = openAgents.has(a.toolUseId);
+  const toggle = () => { open ? openAgents.delete(a.toolUseId) : openAgents.add(a.toolUseId); renderDetail(); };
+  return h('div', { class: 'subagent' },
+    h('button', { class: 'link', 'aria-expanded': String(open), onclick: toggle },
+      `${open ? '▾' : '▸'} ${a.type ?? 'Subagent'}: ${a.toolCount} tool call${a.toolCount === 1 ? '' : 's'} · ${a.finished ? 'finished' : 'still running'}`),
+    open && h('div', { class: 'subagent-body' },
+      a.prompt && h('details', {}, h('summary', {}, 'What it was asked'), h('p', { class: 'sub-prompt' }, a.prompt)),
+      a.tools.length ? h('ol', { class: 'timeline sub-tools' }, a.tools.map((t) =>
+        h('li', { class: `tl${t.error ? ' tl-error' : ''}` },
+          h('span', { class: 'tl-time' }, t.ts ? clock(t.ts) : ''),
+          h('div', { class: 'tl-body' }, h('span', { class: 'tag' }, t.tool), h('span', { class: 'tl-text' }, t.text),
+            t.error && h('span', { class: 'tag err' }, 'failed')))))
+        : h('p', { class: 'muted' }, 'No tool calls.'),
+      a.reply && h('div', {}, h('h3', { class: 'sub-h' }, 'Its reply'), h('div', { class: 'reply md' }, renderMarkdown(a.reply)))));
+}
+
+function runningSubagents(d) {
+  const running = (d?.subagents ?? []).filter((a) => !a.finished);
+  if (!running.length) return null;
+  return h('p', { class: 'now' }, h('strong', {}, `Subagent${running.length > 1 ? 's' : ''} running: `),
+    running.map((a) => `${a.type ?? 'agent'} (${a.description ?? 'no description'})`).join(', '));
+}
+
+// --- rename --------------------------------------------------------------------------------
+
+function startRename(s) {
+  renaming = { id: s.id, value: titleOf(s), error: null, busy: false };
+  renderDetail();
+  const input = document.getElementById('rename-input');
+  input?.focus();
+  input?.select();
+}
+
+function renameForm(s) {
+  const input = h('input', {
+    id: 'rename-input', class: 'input rename-input', maxlength: 200, 'aria-label': 'Session title', required: true,
+    oninput: (e) => { renaming.value = e.target.value; },
+    onkeydown: (e) => { if (e.key === 'Escape') { renaming = null; e.target.blur(); renderDetail(); } },
+  });
+  input.value = renaming.value;
+  const save = async (e) => {
+    e.preventDefault();
+    document.activeElement?.blur();
+    renaming.busy = true;
+    renderDetail();
+    try {
+      const res = await post(`/api/sessions/${encodeURIComponent(s.id)}/rename`, { title: renaming.value });
+      if (!res.ok) throw new Error((await res.text()) || `Error ${res.status}`);
+      renaming = null;
+    } catch (err) {
+      Object.assign(renaming, { busy: false, error: err.message });
+    }
+    renderDetail();
+  };
+  return h('form', { class: 'rename', onsubmit: save },
+    input,
+    h('button', { type: 'submit', class: 'btn allow', disabled: renaming.busy }, renaming.busy ? 'Saving…' : 'Save'),
+    h('button', { type: 'button', class: 'btn', onclick: () => { renaming = null; renderDetail(); } }, 'Cancel'),
+    renaming.error && h('span', { class: 'form-error' }, renaming.error));
 }
 
 // --- live updates --------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 // can be typed in the browser. They run your installed `claude` with its own login and your
 // settings, so the monitor's hooks report them like any other session. Personal use only: the
 // login is yours (see PLAN.md, "Dashboard sessions").
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, renameSession } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -41,9 +41,32 @@ function childEnv() {
   return env;
 }
 
+// The models your account offers, as Claude Code lists them. Read once from a Claude Code
+// process that's never sent a prompt (no usage), loads no settings or hooks, and saves nothing.
+let models = null; // the pending or finished lookup, shared by every caller
+export function listModels() {
+  models ??= (async () => {
+    async function* noPrompt() { await new Promise(() => {}); }
+    const q = query({
+      prompt: noPrompt(),
+      options: { pathToClaudeCodeExecutable: CLAUDE, settingSources: [], persistSession: false, env: childEnv(), cwd: homedir() },
+    });
+    try {
+      return (await q.supportedModels()).map(({ value, displayName, description }) => ({ value, displayName, description }));
+    } finally {
+      q.close();
+    }
+  })().catch((err) => { models = null; throw err; }); // try again next time
+  return models;
+}
+
+// Sets a session's title, as /rename does: one custom-title line appended to its transcript.
+// No call to Claude.
+export const setSessionTitle = (sessionId, title) => renameSession(sessionId, title);
+
 export class DashboardSessions {
   #live = new Map(); // session id -> { q, inbox }
-  owned = new Map(); // session id -> cwd, for every session started here (kept across restarts)
+  owned = new Map(); // session id -> { cwd, model }, for every session started here (kept across restarts)
   lastAuth = null;   // where the last session's credential came from (SDK apiKeySource), e.g. 'none' = your login
 
   // decide(sessionId, toolName, input, signal) -> Promise<PermissionResult>: asks you in the page.
@@ -59,8 +82,8 @@ export class DashboardSessions {
   isLive(id) { return this.#live.has(id); }
 
   // Starts a session (or resumes one started here) and resolves with its session id once
-  // Claude Code has started it.
-  start({ cwd, prompt, resume = null }) {
+  // Claude Code has started it. model: a value from listModels(); null or 'default' = your default.
+  start({ cwd, prompt, resume = null, model = null }) {
     const inbox = new Inbox();
     inbox.push(prompt);
     let sessionId = resume;
@@ -69,6 +92,7 @@ export class DashboardSessions {
       options: {
         cwd,
         ...(resume ? { resume } : {}),
+        ...(model && model !== 'default' ? { model } : {}),
         pathToClaudeCodeExecutable: CLAUDE,
         settingSources: ['user', 'project', 'local'], // your hooks, rules and CLAUDE.md, as in a terminal
         systemPrompt: { type: 'preset', preset: 'claude_code' },
@@ -90,7 +114,7 @@ export class DashboardSessions {
               sessionId = m.session_id;
               this.lastAuth = m.apiKeySource ?? null;
               this.#live.set(sessionId, { q, inbox });
-              this.owned.set(sessionId, cwd);
+              this.owned.set(sessionId, { cwd, model });
               this.event({ session_id: sessionId, cwd, hook_event_name: 'UserPromptSubmit', prompt });
               resolve(sessionId);
             } else if (m.type === 'result' && sessionId) {
@@ -119,9 +143,9 @@ export class DashboardSessions {
       this.event({ session_id: id, hook_event_name: 'UserPromptSubmit', prompt: text });
       return true;
     }
-    const cwd = this.owned.get(id);
-    if (!cwd) return false;
-    await this.start({ cwd, prompt: text, resume: id });
+    const owned = this.owned.get(id);
+    if (!owned) return false;
+    await this.start({ cwd: owned.cwd, model: owned.model, prompt: text, resume: id });
     return true;
   }
 

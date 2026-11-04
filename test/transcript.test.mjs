@@ -77,6 +77,16 @@ test('last response is the text after the last tool call, and turnEnded tracks e
   assert.equal(next.turnEnded, false);
 });
 
+test('subagent transcripts are read only with { sidechain: true }', () => {
+  const text = [
+    { type: 'user', isSidechain: true, message: { role: 'user', content: 'Research X' } },
+    { type: 'assistant', isSidechain: true, message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't1', name: 'WebFetch', input: { url: 'https://x.dev' } }] } },
+  ].map((l) => JSON.stringify(l)).join('\n');
+  assert.equal(parseTranscript(text).timeline.length, 0);
+  const sub = parseTranscript(text, { sidechain: true });
+  assert.deepEqual(sub.timeline.map((i) => [i.kind, i.text, i.id ?? null]), [['prompt', 'Research X', null], ['tool', 'Fetch https://x.dev', 't1']]);
+});
+
 test('bare commands and compaction summaries are not the last prompt', () => {
   const t = parseTranscript([
     { type: 'user', message: { role: 'user', content: 'Real question' } },

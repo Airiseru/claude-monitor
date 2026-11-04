@@ -5,7 +5,9 @@ import { describeTool, oneLine, EDIT_TOOLS } from './tools.mjs';
 const MAX_DIFF = 4000;
 const MAX_RESPONSE = 20_000;
 
-export function parseTranscript(text) {
+// A subagent's own transcript marks every entry as a sidechain; pass { sidechain: true } to
+// read one. A session's main transcript skips them.
+export function parseTranscript(text, { sidechain = false } = {}) {
   const t = {
     title: null, lastPrompt: null, cwd: null, branch: null, model: null, contextTokens: null,
     startedAt: null, updatedAt: null, timeline: [], files: new Map(),
@@ -21,7 +23,7 @@ export function parseTranscript(text) {
     if (!line.trim()) continue;
     let e;
     try { e = JSON.parse(line); } catch { continue; }
-    if (!e || typeof e !== 'object' || e.isSidechain) continue;
+    if (!e || typeof e !== 'object' || Boolean(e.isSidechain) !== sidechain) continue;
 
     if (e.timestamp) { t.startedAt ??= e.timestamp; t.updatedAt = e.timestamp; }
     if (e.cwd) t.cwd = e.cwd;
@@ -71,7 +73,7 @@ export function parseTranscript(text) {
         reply = []; // text before a tool call is narration, not the reply
         t.lastResponse = t.lastResponseAt = null;
         const input = b.input ?? {};
-        const item = { ts: e.timestamp, kind: 'tool', tool: b.name, text: describeTool(b.name, input) };
+        const item = { ts: e.timestamp, kind: 'tool', id: b.id, tool: b.name, text: describeTool(b.name, input) };
         if (b.name === 'Bash' && input.command) item.command = String(input.command).slice(0, MAX_DIFF);
         t.timeline.push(item);
         toolItems.set(b.id, item);
