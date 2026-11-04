@@ -330,6 +330,28 @@ async function handle(req, res) {
     return sendJson(res, { ok: true });
   }
 
+  if (req.method === 'POST' && pathname === '/api/choose-folder') {
+    // A web page can't learn a folder's real path, but this server runs on your Mac, so it opens
+    // the macOS folder dialog itself. The starting folder goes in as an argument, never as
+    // script text.
+    const { from } = await readJson(req, 10_000);
+    const start = typeof from === 'string' ? resolvePath(from.replace(/^~(?=\/|$)/, homedir())) : '';
+    const startExists = start && await stat(start).then((st) => st.isDirectory(), () => false);
+    const script = [
+      'on run argv',
+      'activate',
+      'set p to "Folder for the new Claude session"',
+      'if (count of argv) > 0 then return POSIX path of (choose folder with prompt p default location (POSIX file (item 1 of argv)))',
+      'return POSIX path of (choose folder with prompt p)',
+      'end run',
+    ];
+    const args = [...script.flatMap((line) => ['-e', line]), ...(startExists ? [start] : [])];
+    const folder = await new Promise((resolve) => {
+      execFile('/usr/bin/osascript', args, (err, stdout) => resolve(err ? null : stdout.trim().replace(/(.)\/$/, '$1')));
+    });
+    return sendJson(res, folder ? { folder } : { cancelled: true }); // closing the dialog is a cancel
+  }
+
   if (req.method === 'POST' && pathname === '/api/new-session') {
     const { cwd, prompt } = await readJson(req, 200_000);
     const dir = typeof cwd === 'string' ? resolvePath(cwd.trim().replace(/^~(?=\/|$)/, homedir())) : '';

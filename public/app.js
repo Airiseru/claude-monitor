@@ -333,7 +333,7 @@ function select(id) {
   openFiles.clear();
   render();
   if (id) loadDetail();
-  document.getElementById('detail').scrollTop = 0;
+  document.getElementById('detail-content').scrollTop = 0;
 }
 
 // --- toolbar: sidebar and notifications ----------------------------------------------------
@@ -413,7 +413,7 @@ async function openNewSession() {
   history.replaceState(null, '', location.pathname);
   newSessionOpen = true;
   await checkSetup();
-  if (!newDraft.cwd) newDraft.cwd = (setup.folders[0] ?? '').replace(/^\/Users\/[^/]+/, '~');
+  if (!newDraft.cwd) newDraft.cwd = setup.folders[0] ?? '';
   render();
   document.getElementById('new-prompt')?.focus();
 }
@@ -444,11 +444,31 @@ function authText(auth) {
   return 'your Claude login (no API key found)';
 }
 
+// Opens the macOS folder dialog (through the server, which can see real paths).
+async function chooseFolder() {
+  newDraft.choosing = true;
+  renderDetail();
+  try {
+    const res = await post('/api/choose-folder', { from: newDraft.cwd });
+    const { folder } = await res.json();
+    if (folder) newDraft.cwd = folder;
+  } catch {
+    newDraft.error = 'Couldn’t open the folder dialog';
+  }
+  newDraft.choosing = false;
+  renderDetail();
+}
+
+const tilde = (path) => path.replace(/^\/Users\/[^/]+/, '~');
+
 function newSessionForm() {
-  const field = (key) => ({ value: newDraft[key], oninput: (e) => { newDraft[key] = e.target.value; } });
-  const cwdInput = h('input', { id: 'new-cwd', class: 'input', list: 'recent-folders', required: true, autocomplete: 'off', ...field('cwd') });
-  cwdInput.value = newDraft.cwd;
-  const promptInput = h('textarea', { id: 'new-prompt', class: 'input', rows: 6, required: true, ...field('prompt') });
+  const folders = [...new Set([newDraft.cwd, ...setup.folders].filter(Boolean))];
+  const cwdSelect = h('select', { id: 'new-cwd', class: 'input', required: true, onchange: (e) => { newDraft.cwd = e.target.value; } },
+    folders.length ? folders.map((f) => h('option', { value: f }, tilde(f))) : h('option', { value: '' }, 'No folder chosen yet'));
+  cwdSelect.value = newDraft.cwd;
+  const promptInput = h('textarea', {
+    id: 'new-prompt', class: 'input', rows: 6, required: true, oninput: (e) => { newDraft.prompt = e.target.value; },
+  });
   promptInput.value = newDraft.prompt;
   promptInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.target.form.requestSubmit(); });
   return h('form', { class: 'new-form', onsubmit: startNewSession },
@@ -456,8 +476,10 @@ function newSessionForm() {
     h('p', { class: 'muted' }, 'Starts Claude Code in a folder and lets you reply from this page. Its permission prompts and questions show up here. It runs with ',
       authText(setup.auth), '. For your own use only.'),
     h('label', { for: 'new-cwd' }, 'Folder'),
-    cwdInput,
-    h('datalist', { id: 'recent-folders' }, setup.folders.map((f) => h('option', { value: f.replace(/^\/Users\/[^/]+/, '~') }))),
+    h('div', { class: 'folder-row' },
+      cwdSelect,
+      h('button', { type: 'button', class: 'btn', disabled: newDraft.choosing, onclick: chooseFolder },
+        newDraft.choosing ? 'Choosing… (see the dialog)' : 'Choose in Finder…')),
     h('label', { for: 'new-prompt' }, 'First prompt'),
     promptInput,
     newDraft.error && h('p', { class: 'form-error', role: 'alert' }, newDraft.error),
@@ -491,14 +513,13 @@ function loadDetailSoon() {
 let detailDeferred = false; // a redraw waiting for you to leave a text field
 
 function renderDetail() {
-  const main = document.getElementById('detail');
   const content = document.getElementById('detail-content');
   // Redrawing would throw away what you're typing; catch up when you leave the field.
   const typing = content.contains(document.activeElement) && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
   if (typing) { detailDeferred = true; return; }
   detailDeferred = false;
   const s = sessions.find((x) => x.id === selectedId);
-  const scroll = main.scrollTop;
+  const scroll = content.scrollTop;
   content.replaceChildren();
   renderComposer(s);
   if (newSessionOpen) { content.append(newSessionForm()); return; }
@@ -525,7 +546,7 @@ function renderDetail() {
       : d.error ? h('p', { class: 'empty' }, d.error)
         : [filesSection(d), timelineSection(d)],
   );
-  main.scrollTop = scroll;
+  content.scrollTop = scroll;
 }
 
 function needSection(s) {
