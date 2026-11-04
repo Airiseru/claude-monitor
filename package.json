@@ -7,6 +7,8 @@
     "start": "node server.mjs",
     "test": "node --test",
     "hooks:install": "node install.mjs",
-    "hooks:uninstall": "node install.mjs --uninstall"
+    "hooks:uninstall": "node install.mjs --uninstall",
+    "service:install": "node service.mjs",
+    "service:uninstall": "node service.mjs --uninstall"
   }
 }

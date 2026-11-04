@@ -1,17 +1,21 @@
 # Claude Monitor
 
-A local dashboard for your running Claude Code sessions: which ones need you, what each is doing, how much context it has used, and the files and commands it touched. See `PLAN.md` for the design and phases.
+A local dashboard for your running Claude Code sessions: which ones need you, what each is doing, Claude's latest reply, how much context it has used, and the files and commands it touched. You can answer permission prompts from the page. See `PLAN.md` for the design and test results.
 
 Needs Node 22+. No dependencies.
 
 ```
-npm run hooks:install     # adds hooks + status line wrapper to ~/.claude/settings.json (backs it up first)
-npm start                 # http://localhost:4747
-npm run hooks:uninstall   # removes exactly what install added, restores your status line
+npm run hooks:install       # adds hooks + status line wrapper to ~/.claude/settings.json (backs it up first)
+npm run service:install     # starts the server now and at every login: http://localhost:4747
 npm test
+
+npm start                   # or run the server by hand instead of the login service
+npm run service:uninstall   # stop the login service
+npm run hooks:uninstall     # removes exactly what hooks:install added, restores your status line
 ```
 
-- Hooks run in the background and give up after 2 s, so a stopped server never slows a session.
-- Running sessions pick up the hooks without a restart. Sessions from the last 24 hours show from their transcripts, as "no live activity" until their next event.
-- State lives in memory plus `~/.claude-monitor/` (status line snapshots). Nothing leaves your machine; the server listens on 127.0.0.1 only.
-- `spike/` is the Phase 0 throwaway test and can be deleted.
+- Observer hooks run in the background and give up after 2 s, so a stopped server never slows a session. The permission hook waits for a click only while a dashboard tab is open; the terminal prompt stays usable the whole time.
+- Running sessions pick up the hooks without a restart.
+- State lives in `~/.claude-monitor/`: status line snapshots, `state.json` (live statuses and removed sessions, kept across restarts), and `server.log` when run as a service. The server listens on 127.0.0.1 only.
+- The login service runs the Node at the path you installed it with. If you switch Node versions (nvm), run `npm run service:install` again.
+- "Go to Warp" brings Warp to the front; Warp can't be told to switch to a specific tab from outside.

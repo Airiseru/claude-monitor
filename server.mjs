@@ -366,6 +366,12 @@ setInterval(scanStatusDir, 2000);
 await loadState();
 await loadRecentSessions();
 
+server.on('error', (err) => {
+  console.error(err.code === 'EADDRINUSE'
+    ? `Port ${PORT} is already in use. Is the monitor already running (npm start, or the login service)?`
+    : err.message);
+  process.exit(1);
+});
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Claude Monitor: http://localhost:${PORT}  (${sessions.size} recent sessions)`);
 });

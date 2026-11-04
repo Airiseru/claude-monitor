@@ -49,7 +49,7 @@ claude sessions ──hooks (http POST)──▶ server (127.0.0.1:4747) ──S
 
 ### Phase 0 results (2026-11-04, Claude Code 2.1.318)
 
-Ran a throwaway session against `spike/settings.json` with WebFetch prompts:
+Ran a throwaway session against a spike settings file (since deleted) with WebFetch prompts:
 - Allow: fetch ran, and the terminal said "Allowed by PermissionRequest".
 - Deny: blocked, and Claude received the deny message.
 - No decision: the terminal prompt stayed up and accepted terminal input.
@@ -79,9 +79,19 @@ Ran a live session against a test server (wait shortened to 20 s), with an open 
 Each phase is checked end to end before the next one starts.
 
 0. **Spike. Done 2026-11-04,** results above.
-1. **Read-only monitor.** Server, observer hooks, status line wrapper, transcript parser, session list and detail. Check: open 2–3 sessions in Warp and confirm the statuses, context %, and file lists match what the terminals show.
-2. **Needs you + Allow/Deny. Built and tested 2026-11-04,** pending your check in the real dashboard. Check: trigger WebFetch prompts in one session. Approve one from the browser, deny one, answer one in the terminal (it must leave "Needs you"), and let one time out. Trigger a sandbox prompt and confirm it shows as "Needs you" with no Allow/Deny buttons. Close the dashboard and confirm prompts behave exactly as before.
-3. **Go to tab.** The button runs `open -a Warp`, and the card shows the session's tab title and folder so you can pick the tab. Check: with 3 sessions open, each card's title and folder match its Warp tab.
+1. **Read-only monitor. Done 2026-11-04,** confirmed by you. Server, observer hooks, status line wrapper, transcript parser, session list and detail. Check: open 2–3 sessions in Warp and confirm the statuses, context %, and file lists match what the terminals show.
+2. **Needs you + Allow/Deny. Done 2026-11-04,** confirmed by you. Check: trigger WebFetch prompts in one session. Approve one from the browser, deny one, answer one in the terminal (it must leave "Needs you"), and let one time out. Trigger a sandbox prompt and confirm it shows as "Needs you" with no Allow/Deny buttons. Close the dashboard and confirm prompts behave exactly as before.
+3. **Go to tab. Built 2026-11-04,** pending your check. The **Go to Warp** button runs `open -a Warp`, and the card shows the session's title and folder so you can pick the tab. Check: with 3 sessions open, each card's title and folder match its Warp tab.
+
+### Added after the plan (2026-11-04, pending your check)
+
+- **Claude's reply** to the last prompt (its text after the last tool call), in the detail view and on cards that aren't working.
+- **Remove sessions** from the list: × on a card, **Clear** on a section, or **Remove from list** in the detail view. A removed session comes back on its next event.
+- **Hide/show the sidebar,** remembered per browser. While hidden, the button shows how many sessions need you.
+- **Desktop notifications** when a session needs you or finishes a turn, only while the dashboard isn't focused.
+- **State kept across restarts** in `~/.claude-monitor/state.json`. A turn that finished while the server was down shows as waiting.
+- **Login service** (`npm run service:install`, launchd), restarting the server if it stops.
+- The `spike/` folder is deleted.
 
 ## Risks
 
