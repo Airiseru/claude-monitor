@@ -1,8 +1,9 @@
 // Claude Monitor server: receives hook events, watches status line snapshots, reads transcripts,
 // and serves the dashboard. Listens on 127.0.0.1 only.
+import { execFile } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
-import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { PendingPermissions } from './permissions.mjs';
@@ -13,6 +14,7 @@ const PORT = Number(process.env.PORT ?? 4747);
 const MONITOR_HOME = process.env.CLAUDE_MONITOR_HOME ?? join(homedir(), '.claude-monitor');
 const PROJECTS_DIR = process.env.CLAUDE_PROJECTS_DIR ?? join(homedir(), '.claude', 'projects');
 const STATUS_DIR = join(MONITOR_HOME, 'status');
+const STATE_FILE = join(MONITOR_HOME, 'state.json'); // live statuses + removed sessions, kept across restarts
 const RECENT_MS = 24 * 3600_000;
 const MAX_HOOK_BODY = 5_000_000;
 // How long a permission request waits for a click. Just under the hook's 600 s timeout, so
@@ -33,6 +35,46 @@ const contexts = new Map();    // session id -> latest status line snapshot
 const transcripts = new Map(); // transcript path -> { mtimeMs, size, data }
 const clients = new Set();     // open SSE responses
 const pending = new PendingPermissions();
+const hidden = new Set();      // session ids removed from the list; back on their next event
+
+// --- saved state ---------------------------------------------------------------------------
+
+const SAVED_FIELDS = ['id', 'status', 'need', 'activity', 'cwd', 'transcriptPath', 'lastEventAt', 'lastPrompt'];
+
+async function loadState() {
+  const saved = await readFile(STATE_FILE, 'utf8').then(JSON.parse).catch(() => null);
+  if (!saved) return;
+  const cutoff = Date.now() - RECENT_MS;
+  for (const s of saved.sessions ?? []) {
+    if (!SESSION_ID.test(s.id ?? '') || !(s.lastEventAt >= cutoff)) continue;
+    sessions.set(s.id, { ...Object.fromEntries(SAVED_FIELDS.map((k) => [k, s[k] ?? null])) });
+    const t = s.transcriptPath && await readTranscript(s.transcriptPath).catch(() => null);
+    // Events missed while the server was down: a turn that finished means it's waiting now.
+    if (t?.turnEnded && (s.status === 'working' || s.status === 'needs_you')) {
+      Object.assign(sessions.get(s.id), { status: 'waiting', need: null, activity: null });
+    }
+  }
+  for (const id of saved.hidden ?? []) if (SESSION_ID.test(id)) hidden.add(id);
+}
+
+let saveTimer = null;
+function saveSoon() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(async () => {
+    saveTimer = null;
+    const state = {
+      sessions: [...sessions.values()].map((s) => Object.fromEntries(SAVED_FIELDS.map((k) => [k, s[k] ?? null]))),
+      hidden: [...hidden].filter((id) => sessions.has(id)), // others have aged out of the list anyway
+    };
+    const tmp = `${STATE_FILE}.tmp`;
+    try {
+      await writeFile(tmp, JSON.stringify(state));
+      await rename(tmp, STATE_FILE); // atomic: a crash mid-write never leaves half a file
+    } catch (err) {
+      console.error('Could not save state:', err.message);
+    }
+  }, 1000);
+}
 
 // --- transcripts ---------------------------------------------------------------------------
 
@@ -121,6 +163,7 @@ function summary(s) {
     branch: t?.branch ?? null,
     model: context?.model ?? t?.model ?? null,
     lastPrompt: s.lastPrompt ?? t?.lastPrompt ?? null,
+    lastResponse: t?.lastResponse?.slice(0, 300) ?? null, // the detail view has all of it
     lastEventAt: s.lastEventAt,
     transcriptUpdatedAt: t?.updatedAt ?? null,
     context,
@@ -129,11 +172,12 @@ function summary(s) {
 
 function list() {
   const cutoff = Date.now() - RECENT_MS;
-  return [...sessions.values()].filter((s) => s.lastEventAt >= cutoff).map(summary);
+  return [...sessions.values()].filter((s) => s.lastEventAt >= cutoff && !hidden.has(s.id)).map(summary);
 }
 
 let broadcastTimer = null;
 function broadcast() {
+  saveSoon(); // every change that's worth showing is worth keeping
   if (broadcastTimer) return;
   broadcastTimer = setTimeout(() => {
     broadcastTimer = null;
@@ -217,19 +261,38 @@ async function handle(req, res) {
     if (req.headers.origin) throw new HttpError(403, 'Forbidden'); // browsers send Origin; hooks don't
     const ev = await readJson(req, MAX_HOOK_BODY);
     const s = applyHook(sessions, ev, Date.now());
-    if (s) { refreshSoon(s.id); broadcast(); }
+    if (s) { hidden.delete(s.id); refreshSoon(s.id); broadcast(); } // a removed session that's active again comes back
     if (pathname === '/permission' && s && ev.hook_event_name === 'PermissionRequest') return holdPermission(ev, res);
     if (s && pending.settle(ev)) broadcast();
     res.writeHead(204).end(); // empty response: never changes what the session does
     return;
   }
 
-  const decide = pathname.match(/^\/api\/permissions\/([\w-]+)$/);
-  if (req.method === 'POST' && decide) {
-    // Only this dashboard may answer: same-origin page, holding this run's token.
+  // Every action the page can take needs the same-origin page holding this run's token.
+  if (req.method === 'POST' && pathname.startsWith('/api/')) {
     if (!ALLOWED_ORIGINS.has(req.headers.origin) || !tokenMatches(req.headers['x-monitor-token'])) {
       throw new HttpError(403, 'Forbidden');
     }
+  }
+
+  if (req.method === 'POST' && pathname === '/api/hide') {
+    const { ids } = await readJson(req, 100_000);
+    if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string' && SESSION_ID.test(id))) {
+      throw new HttpError(400, 'ids must be session ids');
+    }
+    for (const id of ids) hidden.add(id);
+    broadcast();
+    return sendJson(res, { ok: true });
+  }
+
+  if (req.method === 'POST' && pathname === '/api/focus-warp') {
+    // Warp can't be told to switch to a specific tab from outside, so this brings it to the front.
+    execFile('/usr/bin/open', ['-a', 'Warp'], (err) => { if (err) console.error('open -a Warp failed:', err.message); });
+    return sendJson(res, { ok: true });
+  }
+
+  const decide = pathname.match(/^\/api\/permissions\/([\w-]+)$/);
+  if (req.method === 'POST' && decide) {
     const { decision } = await readJson(req, 1000);
     if (decision !== 'allow' && decision !== 'deny') throw new HttpError(400, 'decision must be allow or deny');
     const sessionId = pending.resolve(decide[1], decision);
@@ -272,7 +335,10 @@ async function handle(req, res) {
     const s = sessions.get(m[1]);
     if (!s?.transcriptPath) throw new HttpError(404, 'Not found');
     const t = await readTranscript(s.transcriptPath);
-    return sendJson(res, { ...summary(s), timeline: t.timeline.slice(-500), files: [...t.files.values()] });
+    return sendJson(res, {
+      ...summary(s), lastResponse: t.lastResponse, lastResponseAt: t.lastResponseAt, turnEnded: t.turnEnded,
+      timeline: t.timeline.slice(-500), files: [...t.files.values()],
+    });
   }
 
   const asset = STATIC[pathname];
@@ -297,6 +363,7 @@ const server = http.createServer((req, res) => {
 await mkdir(STATUS_DIR, { recursive: true });
 await scanStatusDir();
 setInterval(scanStatusDir, 2000);
+await loadState();
 await loadRecentSessions();
 
 server.listen(PORT, '127.0.0.1', () => {

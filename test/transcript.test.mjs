@@ -58,6 +58,25 @@ test('classifyPrompt separates prompts from bare commands and drops output', () 
   assert.deepEqual(classifyPrompt('hello<system-reminder>x</system-reminder>'), { kind: 'prompt', text: 'hello' });
 });
 
+test('last response is the text after the last tool call, and turnEnded tracks end_turn', () => {
+  const entry = (content, stop_reason) => ({ type: 'assistant', timestamp: 'T', message: { stop_reason, content } });
+  const run = (...entries) => parseTranscript(entries.map((l) => JSON.stringify(l)).join('\n'));
+  const prompt = { type: 'user', message: { role: 'user', content: 'Do it' } };
+
+  const mid = run(prompt, entry([{ type: 'text', text: 'Let me check.' }], 'tool_use'), entry([{ type: 'tool_use', id: 'x', name: 'Bash', input: {} }], 'tool_use'));
+  assert.equal(mid.lastResponse, null, 'narration before a tool call is not the reply');
+  assert.equal(mid.turnEnded, false);
+
+  const done = run(prompt, entry([{ type: 'tool_use', id: 'x', name: 'Bash', input: {} }], 'tool_use'),
+    entry([{ type: 'thinking', thinking: '...' }], 'end_turn'), entry([{ type: 'text', text: 'Done. Tests pass.' }], 'end_turn'));
+  assert.equal(done.lastResponse, 'Done. Tests pass.');
+  assert.equal(done.turnEnded, true);
+
+  const next = run(prompt, entry([{ type: 'text', text: 'Old answer' }], 'end_turn'), { type: 'user', message: { role: 'user', content: 'Again' } });
+  assert.equal(next.lastResponse, null, 'a new prompt clears the previous reply');
+  assert.equal(next.turnEnded, false);
+});
+
 test('bare commands and compaction summaries are not the last prompt', () => {
   const t = parseTranscript([
     { type: 'user', message: { role: 'user', content: 'Real question' } },

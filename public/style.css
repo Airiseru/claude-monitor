@@ -62,6 +62,10 @@ button { font: inherit; color: inherit; }
   padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
 }
 .brand { font-weight: 650; }
+.top-left, .top-right { display: flex; align-items: center; gap: 12px; }
+.top .btn { padding: 3px 10px; font-weight: 550; }
+#toggle-sidebar.alert { color: var(--needs); border-color: var(--needs); }
+.sidebar-hidden .sessions { display: none; }
 .conn { font-size: 12px; color: var(--muted); }
 .conn.live::before { content: "● "; color: var(--waiting); }
 .conn.down { color: var(--needs); }
@@ -102,14 +106,28 @@ button { font: inherit; color: inherit; }
 .card-line.need-line { color: var(--needs); font-weight: 550; }
 .card .ctx { margin: 6px 0 0 16px; }
 
-/* A card with Allow/Deny under it: the two pieces read as one card. */
-.card-group { margin-bottom: 6px; }
-.card-group .card { margin-bottom: 0; border-bottom: 0; border-radius: 8px 8px 0 0; }
+/* Each card sits in a group so it can carry buttons (a card is itself a button, and buttons
+   can't nest). With actions, the card and its action row read as one card. */
+.card-group { position: relative; margin-bottom: 6px; }
+.card-group .card { margin-bottom: 0; }
+.card-group.with-actions .card { border-bottom: 0; border-radius: 8px 8px 0 0; }
 .card-actions {
   background: var(--panel); border: 1px solid var(--border); border-top: 0;
   border-left: 3px solid var(--needs); border-radius: 0 0 8px 8px; padding: 2px 11px 9px 27px; font-size: 12.5px;
 }
-.card-group .card.selected + .card-actions { border-color: var(--accent); border-left-color: var(--needs); }
+.card-group .card.selected ~ .card-actions { border-color: var(--accent); border-left-color: var(--needs); }
+.card.removable .card-top { padding-right: 22px; }
+.card-remove {
+  position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; border-radius: 6px;
+  border: 0; background: none; color: var(--muted); font-size: 17px; line-height: 1; cursor: pointer;
+}
+.card-remove:focus-visible, .link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.link {
+  background: none; border: 0; padding: 0; cursor: pointer; color: var(--accent);
+  font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0;
+}
+.section .link { margin-left: auto; }
 
 .actions { display: inline-flex; gap: 6px; }
 .btn {
@@ -169,6 +187,19 @@ button { font: inherit; color: inherit; }
 .need-box h2 { margin: 0 0 4px; font-size: 14px; color: var(--needs); }
 .need-box p { margin: 0; white-space: pre-wrap; }
 .need-box .hint { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.need-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.detail-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.small { font-size: 12px; font-weight: 400; }
+
+.reply {
+  white-space: pre-wrap; word-break: break-word; background: var(--panel); border: 1px solid var(--border);
+  border-left: 3px solid var(--working); border-radius: 8px; padding: 10px 12px;
+}
+.reply.clipped {
+  max-height: 18em; overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 75%, transparent); mask-image: linear-gradient(#000 75%, transparent);
+}
+.reply + .link { margin-top: 6px; }
 .now { margin: 0 0 18px; }
 
 .block { margin-bottom: 26px; }

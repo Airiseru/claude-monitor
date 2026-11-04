@@ -8,8 +8,14 @@
 </head>
 <body>
   <header class="top">
-    <span class="brand">Claude Monitor</span>
-    <span id="conn" class="conn">Connecting…</span>
+    <div class="top-left">
+      <button id="toggle-sidebar" class="btn" aria-controls="sessions">Hide sessions</button>
+      <span class="brand">Claude Monitor</span>
+    </div>
+    <div class="top-right">
+      <button id="notify" class="btn" aria-pressed="false">Notifications off</button>
+      <span id="conn" class="conn">Connecting…</span>
+    </div>
   </header>
   <div class="layout">
     <nav id="sessions" class="sessions" aria-label="Sessions"></nav>

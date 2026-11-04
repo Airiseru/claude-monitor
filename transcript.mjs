@@ -3,13 +3,18 @@
 import { describeTool, oneLine, EDIT_TOOLS } from './tools.mjs';
 
 const MAX_DIFF = 4000;
+const MAX_RESPONSE = 20_000;
 
 export function parseTranscript(text) {
   const t = {
     title: null, lastPrompt: null, cwd: null, branch: null, model: null, contextTokens: null,
     startedAt: null, updatedAt: null, timeline: [], files: new Map(),
+    lastResponse: null,  // Claude's reply to the last prompt: its text after the last tool call
+    lastResponseAt: null,
+    turnEnded: false,    // Claude finished replying to the last prompt
   };
   let customTitle = null, aiTitle = null;
+  let reply = [];        // text blocks since the last prompt or tool call
   const toolItems = new Map(); // tool_use id -> timeline item
 
   for (const line of text.split('\n')) {
@@ -36,7 +41,12 @@ export function parseTranscript(text) {
           const p = classifyPrompt(b.text);
           if (p) {
             t.timeline.push({ ts: e.timestamp, ...p });
-            if (p.kind === 'prompt') t.lastPrompt = p.text;
+            if (p.kind === 'prompt') {
+              t.lastPrompt = p.text;
+              t.lastResponse = t.lastResponseAt = null;
+              t.turnEnded = false;
+              reply = [];
+            }
           }
         } else if (b?.type === 'tool_result' && b.is_error) {
           const item = toolItems.get(b.tool_use_id);
@@ -49,8 +59,17 @@ export function parseTranscript(text) {
       if (m.model && m.model !== '<synthetic>') t.model = m.model;
       const u = m.usage;
       if (u) t.contextTokens = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+      // A reply is split over several entries, one content block each, each with a stop_reason.
+      if (m.stop_reason) t.turnEnded = m.stop_reason === 'end_turn';
       for (const b of Array.isArray(m.content) ? m.content : []) {
+        if (b?.type === 'text' && b.text?.trim()) {
+          reply.push(b.text.trim());
+          t.lastResponse = reply.join('\n\n').slice(0, MAX_RESPONSE);
+          t.lastResponseAt = e.timestamp;
+        }
         if (b?.type !== 'tool_use') continue;
+        reply = []; // text before a tool call is narration, not the reply
+        t.lastResponse = t.lastResponseAt = null;
         const input = b.input ?? {};
         const item = { ts: e.timestamp, kind: 'tool', tool: b.name, text: describeTool(b.name, input) };
         if (b.name === 'Bash' && input.command) item.command = String(input.command).slice(0, MAX_DIFF);
