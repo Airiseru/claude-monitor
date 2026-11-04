@@ -25,7 +25,8 @@ What's left to build, and the findings any future change has to respect. Everyth
 - Keep `@anthropic-ai/claude-agent-sdk` pinned to the version matching the installed CLI (0.3.318 ↔ 2.1.318). It's installed with `--omit=optional`, so the SDK uses the installed `claude` instead of a bundled copy.
 - Never resume a session that's open in a terminal. Without forking, both write into one transcript. That's why only sessions started from the page take replies.
 - A server restart stops their Claude processes. Your next message resumes them, with the model they were started on.
-- The model list comes from `supportedModels()` on a Claude Code process that's never sent a prompt, loads no settings, and saves no transcript (no usage, no stray session).
+- The model list and the signed-in account (`supportedModels()`, `accountInfo()`) come from a Claude Code process that's never sent a prompt, loads no settings, and saves no transcript (no usage, no stray session). They're re-read after 5 minutes, so a `/login` account switch shows up.
+- Dashboard sessions always use whatever account Claude Code is signed into on that Mac; the monitor has no login of its own.
 - Rename writes one `custom-title` line to the transcript (the SDK's `renameSession`, as `/rename` does). It works for any session, Warp ones included.
 
 **Security**

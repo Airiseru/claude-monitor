@@ -6,7 +6,7 @@ import http from 'node:http';
 import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path';
-import { DashboardSessions, listModels, setSessionTitle } from './agents.mjs';
+import { claudeInfo, DashboardSessions, setSessionTitle } from './agents.mjs';
 import { PendingPermissions } from './permissions.mjs';
 import { applyHook } from './sessions.mjs';
 import { parseTranscript } from './transcript.mjs';
@@ -29,6 +29,8 @@ const STATIC = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/markdown.js': ['markdown.js', 'text/javascript; charset=utf-8'],
+  '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
+  '/favicon-alert.svg': ['favicon-alert.svg', 'image/svg+xml'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
 };
 
@@ -255,6 +257,19 @@ function broadcast() {
   }, 200);
 }
 
+// The code editor to open changed files in: the first of these that's installed, else the
+// default text editor (`open -t`).
+const EDITORS = ['Cursor', 'Visual Studio Code', 'Zed', 'Windsurf', 'Sublime Text'];
+async function findEditor() {
+  for (const name of EDITORS) {
+    for (const dir of ['/Applications', join(homedir(), 'Applications')]) {
+      const path = join(dir, `${name}.app`);
+      if (await stat(path).then(() => true, () => false)) return { name, path };
+    }
+  }
+  return null;
+}
+
 // --- HTTP ----------------------------------------------------------------------------------
 
 class HttpError extends Error {
@@ -362,6 +377,19 @@ async function handle(req, res) {
     return sendJson(res, { ok: true });
   }
 
+  if (req.method === 'POST' && pathname === '/api/open-file') {
+    // Only files the session changed (as its transcript records them), so the page can't be
+    // used to open anything else.
+    const { id, path } = await readJson(req, 10_000);
+    const s = typeof id === 'string' ? sessions.get(id) : null;
+    const t = s?.transcriptPath && await readTranscript(s.transcriptPath).catch(() => null);
+    if (!t || typeof path !== 'string' || !t.files.has(path)) throw new HttpError(404, 'Not a file this session changed');
+    if (!(await stat(path).then((st) => st.isFile(), () => false))) throw new HttpError(404, 'That file no longer exists');
+    const editor = await findEditor();
+    execFile('/usr/bin/open', editor ? ['-a', editor.path, path] : ['-t', path], (err) => { if (err) console.error('open failed:', err.message); });
+    return sendJson(res, { ok: true, editor: editor?.name ?? null });
+  }
+
   if (req.method === 'POST' && pathname === '/api/choose-folder') {
     // A web page can't learn a folder's real path, but this server runs on your Mac, so it opens
     // the macOS folder dialog itself. The starting folder goes in as an argument, never as
@@ -386,7 +414,7 @@ async function handle(req, res) {
 
   if (req.method === 'POST' && pathname === '/api/new-session') {
     const { cwd, prompt, model = null } = await readJson(req, 200_000);
-    if (model != null && !(await listModels().catch(() => [])).some((m) => m.value === model)) {
+    if (model != null && !((await claudeInfo().catch(() => null))?.models ?? []).some((m) => m.value === model)) {
       throw new HttpError(400, 'Unknown model');
     }
     const dir = typeof cwd === 'string' ? resolvePath(cwd.trim().replace(/^~(?=\/|$)/, homedir())) : '';
@@ -475,8 +503,11 @@ async function handle(req, res) {
       .some((g) => (g.hooks ?? []).some((h) => String(h.command ?? '').includes('/permission?from=claude-monitor')));
     // Folders of recent sessions, offered when starting a new one.
     const folders = [...new Set([...sessions.values()].sort((a, b) => b.lastEventAt - a.lastEventAt).map((s) => s.cwd).filter(Boolean))];
-    const models = await listModels().catch((err) => { console.error('Could not list models:', err.message); return []; });
-    return sendJson(res, { permissionHook, auth: dashboard.lastAuth, folders: folders.slice(0, 30), models });
+    const claude = await claudeInfo().catch((err) => { console.error('Could not read Claude Code account/models:', err.message); return null; });
+    return sendJson(res, {
+      permissionHook, auth: dashboard.lastAuth, folders: folders.slice(0, 30),
+      account: claude?.account ?? null, models: claude?.models ?? [], editor: (await findEditor())?.name ?? null,
+    });
   }
 
   if (pathname === '/events') {

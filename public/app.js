@@ -344,6 +344,9 @@ function renderList() {
   }
   const waiting = sessions.filter((s) => s.status === 'needs_you').length;
   document.title = waiting ? `(${waiting}) Claude Monitor` : 'Claude Monitor';
+  const icon = waiting ? '/favicon-alert.svg' : '/favicon.svg'; // orange dot when something needs you
+  const link = document.getElementById('favicon');
+  if (link.getAttribute('href') !== icon) link.setAttribute('href', icon);
   renderToolbar();
 }
 
@@ -456,8 +459,10 @@ const versionOf = (s) => (s ? `${s.lastEventAt}|${s.transcriptUpdatedAt}` : null
 
 async function checkSetup() {
   try {
-    const { permissionHook, auth, folders, models } = await (await fetch('/api/setup')).json();
-    setup = { auth, folders: folders ?? [], models: models ?? [] };
+    const { permissionHook, auth, folders, models, account, editor } = await (await fetch('/api/setup')).json();
+    const editorChanged = editor !== setup.editor;
+    setup = { auth, folders: folders ?? [], models: models ?? [], account, editor };
+    if (editorChanged) renderDetail();
     if (permissionHook !== permissionHookInstalled) { permissionHookInstalled = permissionHook; renderDetail(); }
   } catch {
     // Server unreachable: the connection indicator already says so.
@@ -506,12 +511,15 @@ const modelName = (value) => (value && value !== 'default'
   ? setup.models.find((m) => m.value === value)?.displayName ?? value
   : null);
 
-// What credential dashboard sessions use, in words (SDK apiKeySource; 'none' means no API key,
-// so Claude Code uses your login).
-function authText(auth) {
-  if (auth === 'ANTHROPIC_API_KEY' || auth === 'apiKeyHelper') return 'an API key (billed per token to that API account)';
-  if (auth == null) return 'your Claude login, as in the terminal';
-  return 'your Claude login (no API key found)';
+// Which account dashboard sessions use, in words: whatever Claude Code is signed into.
+// apiKeySource 'none' (or absent) means no API key, so it's the Claude login.
+function authText() {
+  const source = setup.account?.apiKeySource ?? setup.auth;
+  if (source === 'ANTHROPIC_API_KEY' || source === 'apiKeyHelper') return 'an API key, billed per token to that API account';
+  const a = setup.account;
+  if (!a?.email) return 'the Claude account Claude Code is signed into, as in the terminal';
+  const plan = [a.plan && `${a.plan[0].toUpperCase()}${a.plan.slice(1)} plan`, a.organization].filter(Boolean).join(', ');
+  return `the Claude account Claude Code is signed into: ${a.email}${plan ? ` (${plan})` : ''}`;
 }
 
 // Opens the macOS folder dialog (through the server, which can see real paths).
@@ -561,7 +569,7 @@ function newSessionForm() {
   return h('form', { class: 'new-form', onsubmit: startNewSession },
     h('h1', {}, 'New session'),
     h('p', { class: 'muted' }, 'Starts Claude Code in a folder and lets you reply from this page. Its permission prompts and questions show up here. It runs with ',
-      authText(setup.auth), '. For your own use only.'),
+      authText(), '.'),
     h('label', { for: 'new-cwd' }, 'Folder'),
     h('div', { class: 'folder-row' },
       h('span', { class: 'select-wrap' }, cwdSelect),
@@ -682,14 +690,31 @@ function filesSection(d) {
   return h('section', { class: 'block' },
     h('h2', {}, 'Files changed ', h('span', { class: 'count' }, files.length)),
     !files.length ? h('p', { class: 'muted' }, 'No files changed in this session.')
-      : h('ul', { class: 'files' }, files.map((f) => fileRow(f, d.cwd))));
+      : h('ul', { class: 'files' }, files.map((f) => fileRow(f, d))));
 }
 
-function fileRow(f, cwd) {
+const fileErrors = new Map(); // file path -> why it couldn't be opened
+
+async function openFile(sessionId, path) {
+  fileErrors.delete(path);
+  try {
+    const res = await post('/api/open-file', { id: sessionId, path });
+    if (!res.ok) throw new Error((await res.text()) || `Error ${res.status}`);
+  } catch (err) {
+    fileErrors.set(path, err.message);
+  }
+  renderDetail();
+}
+
+function fileRow(f, d) {
   const open = openFiles.has(f.path);
   const failed = f.edits.filter((e) => e.failed).length;
   const ok = f.edits.length - failed;
+  const cwd = d.cwd;
   return h('li', { class: 'file' },
+    h('button', { class: 'link open-file', onclick: () => openFile(d.id, f.path), 'aria-label': `Open ${shortPath(f.path, cwd)}` },
+      setup.editor ? `Open in ${setup.editor === 'Visual Studio Code' ? 'VS Code' : setup.editor}` : 'Open'),
+    fileErrors.has(f.path) && h('span', { class: 'form-error open-error' }, fileErrors.get(f.path)),
     h('button', {
       class: 'file-head', 'aria-expanded': String(open),
       onclick: () => { open ? openFiles.delete(f.path) : openFiles.add(f.path); renderDetail(); },
@@ -810,4 +835,5 @@ function render() {
 
 render();
 connect();
+checkSetup(); // editor name for "Open in …", account for the New session form
 setInterval(renderList, 30_000); // keep "5m ago" fresh
