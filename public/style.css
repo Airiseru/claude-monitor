@@ -104,7 +104,8 @@ button { font: inherit; color: inherit; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .card-line.need-line { color: var(--needs); font-weight: 550; }
-.card .ctx { margin: 6px 0 0 16px; }
+.stats { display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap; }
+.card .stats { margin: 6px 0 0 16px; }
 
 /* Each card sits in a group so it can carry buttons (a card is itself a button, and buttons
    can't nest). With actions, the card and its action row read as one card. */

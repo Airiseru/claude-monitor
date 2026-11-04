@@ -66,6 +66,19 @@ async function post(path, body = {}) {
 const folder = (cwd) => (cwd ? cwd.split('/').filter(Boolean).pop() : null);
 const shortPath = (path, cwd) => (cwd && path.startsWith(cwd + '/') ? path.slice(cwd.length + 1) : path.replace(/^\/Users\/[^/]+/, '~'));
 const tokens = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+const usd = (n) => (n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`);
+
+// Context bar plus cost, side by side. Cost is the session's tokens at API prices: an estimate
+// of usage, not a bill, on a subscription.
+function stats(s, large = false) {
+  const c = s.cost;
+  const cost = c?.usd != null && (large
+    ? `≈ ${usd(c.usd)} at API prices${c.linesAdded != null ? ` · +${c.linesAdded.toLocaleString()} / −${(c.linesRemoved ?? 0).toLocaleString()} lines` : ''}`
+    : usd(c.usd));
+  const bar = contextBar(s.context, large);
+  if (!bar && !cost) return null;
+  return h('div', { class: `stats${large ? ' large' : ''}` }, bar, cost && h('span', { class: 'ctx-text' }, cost));
+}
 const clock = (ts) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
 function ago(ms) {
@@ -178,7 +191,7 @@ function card(s) {
         h('span', { class: 'ago' }, ago(s.lastEventAt))),
       meta && h('div', { class: 'card-meta' }, meta),
       h('div', { class: `card-line ${s.need ? 'need-line' : ''}` }, lineOf(s)),
-      contextBar(s.context)),
+      stats(s)),
     removable && h('button', { class: 'card-remove', 'aria-label': `Remove “${titleOf(s)}” from the list`, onclick: () => removeSessions([s.id]) }, '×'),
     actions && h('div', { class: 'card-actions' }, actions));
 }
@@ -301,7 +314,7 @@ function renderDetail() {
         h('span', { class: `pill ${s.status}` }, STATUS_LABEL[s.status] ?? s.status),
         h('h1', {}, titleOf(s))),
       h('div', { class: 'meta' }, [s.cwd && s.cwd.replace(/^\/Users\/[^/]+/, '~'), s.branch, s.model].filter(Boolean).join('  ·  ')),
-      contextBar(s.context, true),
+      stats(s, true),
       h('div', { class: 'detail-actions' },
         warpButton(),
         !LIVE.has(s.status) && h('button', { class: 'btn', onclick: () => removeSessions([s.id]) }, 'Remove from list'))),

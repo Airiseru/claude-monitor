@@ -32,7 +32,8 @@ const STATIC = {
 };
 
 const sessions = new Map();    // session id -> live state (sessions.mjs)
-const contexts = new Map();    // session id -> latest status line snapshot
+const contexts = new Map();    // session id -> context use, from the latest status line snapshot
+const costs = new Map();       // session id -> cost and lines changed, from the same snapshot
 const transcripts = new Map(); // transcript path -> { mtimeMs, size, data }
 const clients = new Set();     // open SSE responses
 const pending = new PendingPermissions();
@@ -142,6 +143,12 @@ async function loadStatus(file) {
       tokens: cw.total_input_tokens ?? null,
       model: s.model?.display_name ?? null,
     });
+    const c = s.cost ?? {};
+    costs.set(id, {
+      usd: c.total_cost_usd ?? null, // what the session's tokens cost at API prices
+      linesAdded: c.total_lines_added ?? null,
+      linesRemoved: c.total_lines_removed ?? null,
+    });
     broadcast();
   } catch {
     // Removed or unreadable: keep the last good snapshot.
@@ -168,6 +175,7 @@ function summary(s) {
     lastEventAt: s.lastEventAt,
     transcriptUpdatedAt: t?.updatedAt ?? null,
     context,
+    cost: costs.get(s.id) ?? null,
   };
 }
 
