@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+# Phase 0 spike output (contains session prompts)
+spike/*.jsonl
+spike/decision
+spike/playground/.claude/
