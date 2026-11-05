@@ -14,7 +14,11 @@
       <span class="brand">Claude Monitor</span>
     </div>
     <div class="top-right">
-      <div id="limits" class="limits" role="group" aria-label="Your plan’s usage limits"></div>
+      <!-- Your plan's usage limits: a "Usage" button, details shown on hover, focus or tap. -->
+      <div id="usage" class="usage" hidden>
+        <button id="usage-toggle" class="peek" type="button" aria-expanded="false" aria-controls="limits">Usage</button>
+        <div id="limits" class="limits" role="group" aria-label="Your plan’s usage limits"></div>
+      </div>
       <!-- Possibly stuck sessions, nearly full context, and spend: a popup, shown only when asked for. -->
       <div class="insights-anchor">
         <button id="insights-toggle" class="btn" aria-expanded="false" aria-controls="insights" aria-haspopup="dialog">Insights</button>

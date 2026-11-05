@@ -613,6 +613,7 @@ document.addEventListener('keydown', (e) => {
 // --- usage limits (header) -----------------------------------------------------------------
 
 let limits = null; // { fiveHour, sevenDay: { pct, resetsAt } | null, at }
+const LIMITS_STALE_MS = 15 * 60_000; // grey the limits out once their snapshot is this old
 
 function resetText(ms) {
   if (!ms) return '';
@@ -622,20 +623,40 @@ function resetText(ms) {
 }
 
 function renderLimits() {
+  const wrap = document.getElementById('usage');
   const box = document.getElementById('limits');
   box.replaceChildren();
-  if (!limits) return;
-  for (const [label, w] of [['5-hour', limits.fiveHour], ['Weekly', limits.sevenDay]]) {
-    if (!w) continue;
+  const windows = limits ? [['5-hour limit', limits.fiveHour], ['Weekly limit', limits.sevenDay]].filter(([, w]) => w) : [];
+  wrap.hidden = !windows.length;
+  if (!windows.length) return;
+  for (const [label, w] of windows) {
     const pct = Math.round(w.pct);
     const fill = h('div', { class: `ctx-fill ${pct >= 80 ? 'high' : pct >= 60 ? 'mid' : 'low'}` });
     fill.style.width = `${Math.min(pct, 100)}%`;
     box.append(h('div', { class: 'limit' },
-      h('span', { class: 'limit-label' }, `${label} ${pct}%`),
-      h('div', { class: 'ctx-track', role: 'meter', 'aria-valuenow': pct, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-label': `${label} usage limit` }, fill),
+      h('div', { class: 'limit-top' },
+        h('span', { class: 'limit-label' }, label),
+        h('span', { class: 'limit-pct' }, `${pct}%`)),
+      h('div', { class: 'ctx-track', role: 'meter', 'aria-valuenow': pct, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-label': label }, fill),
       w.resetsAt && h('span', { class: 'limit-reset' }, resetText(w.resetsAt))));
   }
+  // The numbers are from the last status line a terminal session drew, so say when that was;
+  // after a while they're greyed out, since you've likely used more since.
+  const stale = Date.now() - limits.at > LIMITS_STALE_MS;
+  wrap.classList.toggle('stale', stale);
+  const sameDay = new Date(limits.at).toDateString() === new Date().toDateString();
+  box.append(h('p', { class: 'limits-asof' },
+    `As of ${sameDay ? '' : `${new Date(limits.at).toLocaleDateString([], { weekday: 'short' })} `}${clock(limits.at)}, from the last status line a Claude Code terminal session drew.`,
+    stale ? ' Usage since then isn’t counted yet.' : ''));
 }
+
+// Hover or focus shows the details; a tap (no hover on touch screens) pins them open.
+function setUsageOpen(open) {
+  document.getElementById('usage').classList.toggle('open', open);
+  document.getElementById('usage-toggle').setAttribute('aria-expanded', String(open));
+}
+document.getElementById('usage-toggle').addEventListener('click', () => setUsageOpen(!document.getElementById('usage').classList.contains('open')));
+document.addEventListener('click', (e) => { if (!e.target.closest('#usage')) setUsageOpen(false); });
 
 document.getElementById('new-session').addEventListener('click', openNewSession);
 document.getElementById('search').addEventListener('input', (e) => { filter.text = e.target.value; renderList(); });

@@ -66,7 +66,9 @@ button { font: inherit; color: inherit; }
 .top-right { flex-wrap: wrap; justify-content: flex-end; }
 /* Header text never breaks mid-label; on narrow screens whole items wrap instead */
 .brand, .top .btn, .limit-label, .limit-reset, .conn { white-space: nowrap; }
-.top .btn { padding: 3px 10px; font-weight: 550; }
+.top .btn { padding: 3px 10px; font-weight: 550; box-shadow: 0 1px 0 var(--border); }
+.top .btn:hover:not(:disabled) { border-color: var(--muted); background: var(--panel); }
+.top .btn:active:not(:disabled) { transform: translateY(1px); box-shadow: none; }
 #toggle-sidebar.alert { color: var(--needs); border-color: var(--needs); }
 .sidebar-hidden .sidebar, .sidebar-hidden .resize { display: none; }
 .conn { font-size: 12px; color: var(--muted); }
@@ -101,20 +103,43 @@ kbd {
 .section.project { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--text); }
 .count.needs { background: var(--needs-bg); color: var(--needs); }
 
-.limits { display: flex; gap: 16px; align-items: center; }
-.limit { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
-.limit .ctx-track { width: 60px; }
-.limit-label { color: var(--text); font-weight: 550; }
-@media (max-width: 900px) { .limit-reset { display: none; } }
+/* Usage limits: a "Usage" button in the header; the details drop down on hover, focus or tap */
+.usage { position: relative; }
+.usage[hidden] { display: none; }
+/* Reads as a status readout, not a button: no box, dotted underline, a caret, help cursor.
+   Still a <button> so it can be focused and tapped open on touch screens. */
+.peek {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 2px;
+  font-size: 12.5px; font-weight: 550; white-space: nowrap; color: var(--muted);
+  background: none; border: 0; cursor: help;
+  text-decoration: underline dotted; text-underline-offset: 3px;
+}
+.peek::after { content: "▾"; font-size: 10px; text-decoration: none; }
+.usage:hover .peek, .usage.open .peek { color: var(--text); }
+.peek:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.usage.stale .peek { font-style: italic; }
+.limits {
+  display: none; position: absolute; top: calc(100% + 8px); right: 0; z-index: 20;
+  width: 280px; padding: 12px 14px; flex-direction: column; gap: 12px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+}
+.limits::before { content: ""; position: absolute; left: 0; right: 0; top: -9px; height: 9px; } /* keeps hover alive across the gap */
+.usage:hover .limits, .usage:focus-within .limits, .usage.open .limits { display: flex; }
+.limit { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+.limit-top { display: flex; justify-content: space-between; align-items: baseline; }
+.limit-label { color: var(--text); font-weight: 550; font-size: 13px; }
+.limit-pct { color: var(--text); font-weight: 600; }
+.limit .ctx-track { width: 100%; }
+.limits-asof { margin: 0; font-size: 11.5px; line-height: 1.4; color: var(--muted); }
+.usage.stale .limit { opacity: .45; }
+.usage.stale .limits-asof { font-style: italic; }
 @media (max-width: 760px) {
   .top { padding: 8px 12px; }
   .top-right { width: 100%; justify-content: space-between; gap: 8px 10px; }
-  .limit .ctx-track { width: 44px; }
 }
 @media (max-width: 480px) {
-  .limits { width: 100%; gap: 12px; }
-  .limit { flex: 1; }
-  .limit .ctx-track { flex: 1; width: auto; }
+  .limits { right: auto; left: 0; width: min(280px, calc(100vw - 24px)); }
 }
 
 .filter-note { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--muted); margin: 8px 6px 0; }
