@@ -6,7 +6,7 @@ const SECTIONS = [
   ['needs_you', 'Needs you'],
   ['working', 'Working'],
   ['waiting', 'Waiting for your next prompt'],
-  ['idle', 'Last 24 hours, no events since the monitor started'],
+  ['idle', 'Last 36 hours, no events since the monitor started'],
   ['ended', 'Ended'],
 ];
 const STATUS_LABEL = {
@@ -358,7 +358,7 @@ function renderList() {
   }
   if (starting) nav.append(h('h2', { class: 'section working' }, h('span', { class: 'section-label' }, 'Starting')), startingCard());
   if (!sessions.length) {
-    nav.append(h('p', { class: 'empty' }, 'No sessions in the last 24 hours.'));
+    nav.append(h('p', { class: 'empty' }, 'No sessions in the last 36 hours.'));
   } else if (!shown.length) {
     nav.append(h('p', { class: 'empty' }, 'No sessions match.'));
   }

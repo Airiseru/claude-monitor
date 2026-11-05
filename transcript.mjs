@@ -1,5 +1,6 @@
 // Reads a Claude Code session transcript (.jsonl). The format is internal and changes between
 // Claude Code versions, so every field is optional and lines that don't fit are skipped.
+import { open, stat } from 'node:fs/promises';
 import { describeTool, oneLine, EDIT_TOOLS } from './tools.mjs';
 
 const MAX_DIFF = 4000;
@@ -7,8 +8,74 @@ const MAX_RESPONSE = 20_000;
 
 // A subagent's own transcript marks every entry as a sidechain; pass { sidechain: true } to
 // read one. A session's main transcript skips them.
-export function parseTranscript(text, { sidechain = false } = {}) {
-  const t = {
+export function parseTranscript(text, options) {
+  const reader = new TranscriptReader(options);
+  reader.push(text);
+  return reader.result();
+}
+
+// Follows a transcript file. Transcripts are append-only, so each read() parses only the bytes
+// added since the last one; a line still being written (no newline yet) waits for the next
+// read. A file that shrank or was replaced is read again from the start. Reads take turns, so
+// the same bytes are never parsed twice.
+export class TranscriptFile {
+  #path;
+  #options;
+  #reader = null;
+  #ino = null;
+  #offset = 0;
+  #seen = null;   // `${mtimeMs}|${size}` at the last read
+  #data = null;
+  #reading = Promise.resolve();
+
+  constructor(path, options) { this.#path = path; this.#options = options; }
+
+  // The result of the last read(), or null before the first one finishes. For callers that
+  // can't wait, like building the session list.
+  get latest() { return this.#data; }
+
+  read() {
+    const next = this.#reading.catch(() => {}).then(() => this.#readNew());
+    this.#reading = next;
+    return next;
+  }
+
+  async #readNew() {
+    const st = await stat(this.#path);
+    const seen = `${st.mtimeMs}|${st.size}`;
+    if (this.#data && this.#seen === seen) return this.#data;
+    if (!this.#reader || this.#ino !== st.ino || st.size < this.#offset) {
+      this.#reader = new TranscriptReader(this.#options);
+      this.#ino = st.ino;
+      this.#offset = 0;
+      this.#data = null;
+    }
+    if (st.size > this.#offset) {
+      const file = await open(this.#path, 'r');
+      try {
+        const buf = Buffer.alloc(st.size - this.#offset);
+        const { bytesRead } = await file.read(buf, 0, buf.length, this.#offset);
+        const end = bytesRead ? buf.lastIndexOf(0x0a, bytesRead - 1) + 1 : 0; // just past the last complete line
+        if (end > 0) {
+          this.#reader.push(buf.toString('utf8', 0, end));
+          this.#offset += end;
+          this.#data = null;
+        }
+      } finally {
+        await file.close();
+      }
+    }
+    this.#data ??= this.#reader.result();
+    this.#seen = seen;
+    return this.#data;
+  }
+}
+
+// Reads a transcript a piece at a time, so an append-only file can be followed without
+// re-reading it: push() each new run of complete lines, then result() for the summary so far.
+export class TranscriptReader {
+  #sidechain;
+  #t = {
     title: null, lastPrompt: null, cwd: null, branch: null, model: null, contextTokens: null,
     startedAt: null, updatedAt: null, timeline: [], files: new Map(),
     lastResponse: null,  // Claude's reply to the last prompt: its text after the last tool call
@@ -16,25 +83,48 @@ export function parseTranscript(text, { sidechain = false } = {}) {
     turnEnded: false,    // Claude finished replying to the last prompt
     messages: [],        // the conversation: { role: 'user' | 'assistant', ts, text }
   };
-  let customTitle = null, aiTitle = null;
-  let reply = [];        // text blocks since the last prompt or tool call
-  let said = null;       // Claude's chat message still being added to (no tool call since)
-  const toolItems = new Map(); // tool_use id -> timeline item
+  #customTitle = null;
+  #aiTitle = null;
+  #reply = [];           // text blocks since the last prompt or tool call
+  #said = null;          // Claude's chat message still being added to (no tool call since)
+  #toolItems = new Map(); // tool_use id -> timeline item
 
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue;
+  constructor({ sidechain = false } = {}) { this.#sidechain = sidechain; }
+
+  push(text) {
+    for (const line of text.split('\n')) this.#line(line);
+  }
+
+  // The transcript read so far. Its timeline and messages are shared with the reader, so later
+  // push() calls can still add to them; callers use a result right away and then drop it.
+  result() {
+    const t = this.#t;
+    return {
+      ...t,
+      title: this.#customTitle ?? this.#aiTitle,
+      // Edits whose tool call failed didn't change the file.
+      files: new Map([...t.files].map(([path, f]) => [path, {
+        path, edits: f.edits.map(({ item, ...edit }) => ({ ...edit, failed: Boolean(item.error) })),
+      }])),
+    };
+  }
+
+  #line(line) {
+    const t = this.#t;
+    const sidechain = this.#sidechain;
+    if (!line.trim()) return;
     let e;
-    try { e = JSON.parse(line); } catch { continue; }
-    if (!e || typeof e !== 'object' || Boolean(e.isSidechain) !== sidechain) continue;
+    try { e = JSON.parse(line); } catch { return; }
+    if (!e || typeof e !== 'object' || Boolean(e.isSidechain) !== sidechain) return;
 
     if (e.timestamp) { t.startedAt ??= e.timestamp; t.updatedAt = e.timestamp; }
     if (e.cwd) t.cwd = e.cwd;
     if (e.gitBranch && e.gitBranch !== 'HEAD') t.branch = e.gitBranch; // HEAD: not a git repo, or detached
-    if (e.type === 'custom-title' && e.customTitle) customTitle = e.customTitle;
-    if (e.type === 'ai-title' && e.aiTitle) aiTitle = e.aiTitle;
+    if (e.type === 'custom-title' && e.customTitle) this.#customTitle = e.customTitle;
+    if (e.type === 'ai-title' && e.aiTitle) this.#aiTitle = e.aiTitle;
 
     const m = e.message;
-    if (!m || typeof m !== 'object') continue;
+    if (!m || typeof m !== 'object') return;
 
     if (e.type === 'user' && e.isCompactSummary) {
       t.timeline.push({ ts: e.timestamp, kind: 'note', text: 'Context compacted: earlier conversation summarized' });
@@ -47,15 +137,15 @@ export function parseTranscript(text, { sidechain = false } = {}) {
             t.timeline.push({ ts: e.timestamp, ...p });
             if (p.kind === 'prompt') {
               t.messages.push({ role: 'user', ts: e.timestamp, text: p.text });
-              said = null;
+              this.#said = null;
               t.lastPrompt = p.text;
               t.lastResponse = t.lastResponseAt = null;
               t.turnEnded = false;
-              reply = [];
+              this.#reply = [];
             }
           }
         } else if (b?.type === 'tool_result' && b.is_error) {
-          const item = toolItems.get(b.tool_use_id);
+          const item = this.#toolItems.get(b.tool_use_id);
           if (item) item.error = true;
         }
       }
@@ -69,21 +159,21 @@ export function parseTranscript(text, { sidechain = false } = {}) {
       if (m.stop_reason) t.turnEnded = m.stop_reason === 'end_turn';
       for (const b of Array.isArray(m.content) ? m.content : []) {
         if (b?.type === 'text' && b.text?.trim()) {
-          reply.push(b.text.trim());
-          if (said) said.text = `${said.text}\n\n${b.text.trim()}`.slice(0, MAX_RESPONSE);
-          else t.messages.push(said = { role: 'assistant', ts: e.timestamp, text: b.text.trim().slice(0, MAX_RESPONSE) });
-          t.lastResponse = reply.join('\n\n').slice(0, MAX_RESPONSE);
+          this.#reply.push(b.text.trim());
+          if (this.#said) this.#said.text = `${this.#said.text}\n\n${b.text.trim()}`.slice(0, MAX_RESPONSE);
+          else t.messages.push(this.#said = { role: 'assistant', ts: e.timestamp, text: b.text.trim().slice(0, MAX_RESPONSE) });
+          t.lastResponse = this.#reply.join('\n\n').slice(0, MAX_RESPONSE);
           t.lastResponseAt = e.timestamp;
         }
         if (b?.type !== 'tool_use') continue;
-        reply = []; // text before a tool call is narration, not the reply
-        said = null;
+        this.#reply = []; // text before a tool call is narration, not the reply
+        this.#said = null;
         t.lastResponse = t.lastResponseAt = null;
         const input = b.input ?? {};
         const item = { ts: e.timestamp, kind: 'tool', id: b.id, tool: b.name, text: describeTool(b.name, input) };
         if (b.name === 'Bash' && input.command) item.command = String(input.command).slice(0, MAX_DIFF);
         t.timeline.push(item);
-        toolItems.set(b.id, item);
+        this.#toolItems.set(b.id, item);
 
         const path = input.file_path ?? input.notebook_path;
         if (EDIT_TOOLS.has(b.name) && path) {
@@ -95,13 +185,6 @@ export function parseTranscript(text, { sidechain = false } = {}) {
       }
     }
   }
-
-  t.title = customTitle ?? aiTitle;
-  // Edits whose tool call failed didn't change the file; mark them once all results are in.
-  for (const f of t.files.values()) {
-    for (const edit of f.edits) { edit.failed = Boolean(edit.item.error); delete edit.item; }
-  }
-  return t;
 }
 
 // Classifies a user message as it was typed:

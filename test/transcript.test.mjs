@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { classifyPrompt, parseTranscript } from '../transcript.mjs';
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
+import { classifyPrompt, parseTranscript, TranscriptFile } from '../transcript.mjs';
 
 const lines = [
   { type: 'ai-title', aiTitle: 'Auto title' },
@@ -111,4 +114,60 @@ test('keeps the conversation as chat messages, splitting Claude’s text at tool
     { role: 'assistant', ts: 't2', text: 'Checking.\n\nOne sec.' },
     { role: 'assistant', ts: 't5', text: 'Done.' },
   ]);
+});
+
+// --- following a transcript file -----------------------------------------------------------
+
+const dir = mkdtempSync(join(tmpdir(), 'claude-monitor-transcript-'));
+after(() => rmSync(dir, { recursive: true, force: true }));
+const jsonl = (entries) => entries.map((l) => JSON.stringify(l)).join('\n') + '\n';
+const prompt = (text, ts = '2026-11-04T02:00:00Z') => ({ type: 'user', timestamp: ts, message: { role: 'user', content: text } });
+const said = (text) => ({ type: 'assistant', timestamp: '2026-11-04T02:00:01Z', message: { stop_reason: 'end_turn', content: [{ type: 'text', text }] } });
+
+test('reading a file a piece at a time gives the same result as reading it whole', async () => {
+  const path = join(dir, 'pieces.jsonl');
+  const whole = jsonl(lines);
+  writeFileSync(path, '');
+  const file = new TranscriptFile(path);
+  for (let i = 0; i < whole.length; i += 97) {
+    appendFileSync(path, whole.slice(i, i + 97));
+    await file.read();
+  }
+  const got = await file.read();
+  assert.equal(file.latest, got); // kept for callers that can't wait for a read
+  const want = parseTranscript(whole);
+  assert.deepEqual({ ...got, files: [...got.files.values()] }, { ...want, files: [...want.files.values()] });
+});
+
+test('a line still being written waits for its newline, even mid-character', async () => {
+  const path = join(dir, 'partial.jsonl');
+  writeFileSync(path, jsonl([prompt('first')]));
+  const file = new TranscriptFile(path);
+  assert.equal((await file.read()).lastPrompt, 'first');
+  const next = Buffer.from(JSON.stringify(prompt('café ☕')) + '\n');
+  const cut = next.indexOf(Buffer.from('☕')) + 1; // inside the emoji's bytes
+  appendFileSync(path, next.subarray(0, cut));
+  assert.equal((await file.read()).lastPrompt, 'first');
+  appendFileSync(path, next.subarray(cut));
+  assert.equal((await file.read()).lastPrompt, 'café ☕');
+});
+
+test('reads at the same time never parse the same lines twice', async () => {
+  const path = join(dir, 'concurrent.jsonl');
+  writeFileSync(path, jsonl([prompt('one'), said('hi')]));
+  const file = new TranscriptFile(path);
+  await file.read();
+  appendFileSync(path, jsonl([prompt('two'), said('hello')]));
+  const results = await Promise.all([file.read(), file.read(), file.read()]);
+  for (const t of results) assert.deepEqual(t.messages.map((m) => m.text), ['one', 'hi', 'two', 'hello']);
+});
+
+test('a file that is rewritten shorter is read again from the start', async () => {
+  const path = join(dir, 'rewritten.jsonl');
+  writeFileSync(path, jsonl([prompt('one'), prompt('two'), prompt('three')]));
+  const file = new TranscriptFile(path);
+  assert.equal((await file.read()).timeline.length, 3);
+  writeFileSync(path, jsonl([prompt('only')]));
+  const t = await file.read();
+  assert.deepEqual(t.timeline.map((i) => i.text), ['only']);
 });

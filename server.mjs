@@ -3,20 +3,20 @@
 import { execFile } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
-import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { claudeInfo, DashboardSessions, setSessionTitle } from './agents.mjs';
 import { PendingPermissions } from './permissions.mjs';
 import { applyHook } from './sessions.mjs';
-import { parseTranscript } from './transcript.mjs';
+import { TranscriptFile } from './transcript.mjs';
 
 const PORT = Number(process.env.PORT ?? 4747);
 const MONITOR_HOME = process.env.CLAUDE_MONITOR_HOME ?? join(homedir(), '.claude-monitor');
 const PROJECTS_DIR = process.env.CLAUDE_PROJECTS_DIR ?? join(homedir(), '.claude', 'projects');
 const STATUS_DIR = join(MONITOR_HOME, 'status');
 const STATE_FILE = join(MONITOR_HOME, 'state.json'); // live statuses + removed sessions, kept across restarts
-const RECENT_MS = 24 * 3600_000;
+const RECENT_MS = 36 * 3600_000;
 const MAX_HOOK_BODY = 5_000_000;
 // How long a permission request waits for a click. Just under the hook's 600 s timeout, so
 // the server always answers before Claude Code gives up on the hook.
@@ -37,7 +37,7 @@ const STATIC = {
 const sessions = new Map();    // session id -> live state (sessions.mjs)
 const contexts = new Map();    // session id -> context use, from the latest status line snapshot
 const costs = new Map();       // session id -> cost and lines changed, from the same snapshot
-const transcripts = new Map(); // transcript path -> { mtimeMs, size, data }
+const transcripts = new Map(); // transcript path -> TranscriptFile
 const clients = new Set();     // open SSE responses
 const pending = new PendingPermissions();
 const hidden = new Set();      // session ids removed from the list; back on their next event
@@ -111,28 +111,30 @@ function saveSoon() {
 
 // --- transcripts ---------------------------------------------------------------------------
 
+// Each transcript is followed (only new lines are parsed) and its latest summary kept.
 async function readTranscript(path, options) {
-  const st = await stat(path);
-  const hit = transcripts.get(path);
-  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.data;
-  const data = parseTranscript(await readFile(path, 'utf8'), options);
-  transcripts.set(path, { mtimeMs: st.mtimeMs, size: st.size, data });
-  return data;
+  let file = transcripts.get(path);
+  if (!file) transcripts.set(path, file = new TranscriptFile(path, options));
+  return file.read();
 }
 
 // A session's subagents: <session>/subagents/agent-<id>.jsonl plus a .meta.json that names the
 // parent's Agent tool call that started it.
+const finishedAgents = new Map(); // meta file path -> summary of a finished subagent; it won't change again
 async function readSubagents(transcriptPath) {
   const dir = join(transcriptPath.replace(/\.jsonl$/, ''), 'subagents');
   const out = [];
   for (const file of await readdir(dir).catch(() => [])) {
     const agentId = file.match(/^agent-([\w-]+)\.meta\.json$/)?.[1];
     if (!agentId) continue;
-    const meta = await readFile(join(dir, file), 'utf8').then(JSON.parse).catch(() => null);
+    const metaPath = join(dir, file);
+    const done = finishedAgents.get(metaPath);
+    if (done) { out.push(done); continue; }
+    const meta = await readFile(metaPath, 'utf8').then(JSON.parse).catch(() => null);
     const t = await readTranscript(join(dir, `agent-${agentId}.jsonl`), { sidechain: true }).catch(() => null);
     if (!meta || !t) continue;
     const tools = t.timeline.filter((i) => i.kind === 'tool');
-    out.push({
+    const agent = {
       agentId,
       toolUseId: meta.toolUseId ?? null,
       type: meta.agentType ?? null,
@@ -144,7 +146,12 @@ async function readSubagents(transcriptPath) {
       toolCount: tools.length,
       tools: tools.slice(-200),
       reply: t.lastResponse,
-    });
+    };
+    if (agent.finished && t.turnEnded) { // both, in case the meta file is written before the last lines
+      finishedAgents.set(metaPath, agent);
+      transcripts.delete(join(dir, `agent-${agentId}.jsonl`)); // the summary is all that's needed now
+    }
+    out.push(agent);
   }
   return out.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
 }
@@ -231,7 +238,7 @@ async function loadStatus(file, mtimeMs = Date.now()) {
 // --- session list --------------------------------------------------------------------------
 
 function summary(s) {
-  const t = transcripts.get(s.transcriptPath)?.data;
+  const t = transcripts.get(s.transcriptPath)?.latest;
   const context = contexts.get(s.id) ?? (t?.contextTokens ? { pct: null, size: null, tokens: t.contextTokens, model: null } : null);
   return {
     id: s.id,
@@ -257,6 +264,38 @@ function summary(s) {
 function list() {
   const cutoff = Date.now() - RECENT_MS;
   return [...sessions.values()].filter((s) => s.lastEventAt >= cutoff && !hidden.has(s.id)).map(summary);
+}
+
+// Sessions that have dropped out of the list (no events for RECENT_MS) are forgotten, with
+// their cached transcripts and status line snapshots, so a server that runs for weeks doesn't
+// keep every session it has ever seen. A live one stays, however long it has been quiet.
+async function pruneOld(now = Date.now()) {
+  const cutoff = now - RECENT_MS;
+  for (const [id, s] of sessions) {
+    if (s.lastEventAt >= cutoff || dashboard.isLive(id) || pending.forSession(id).length) continue;
+    sessions.delete(id);
+    hidden.delete(id);
+    dashboard.owned.delete(id);
+    contexts.delete(id);
+    costs.delete(id);
+    clearTimeout(refreshTimers.get(id));
+    refreshTimers.delete(id);
+  }
+  // Keep the transcripts (and subagent transcripts) of the sessions that are left.
+  const keep = [...sessions.values()].map((s) => s.transcriptPath).filter(Boolean);
+  const kept = (path) => keep.some((p) => path === p || path.startsWith(`${p.replace(/\.jsonl$/, '')}/`));
+  for (const path of transcripts.keys()) if (!kept(path)) transcripts.delete(path);
+  for (const path of finishedAgents.keys()) if (!kept(path)) finishedAgents.delete(path);
+  // A session's status line rewrites its snapshot on its next turn, so old ones can go.
+  for (const file of await readdir(STATUS_DIR).catch(() => [])) {
+    const st = await stat(join(STATUS_DIR, file)).catch(() => null);
+    if (!st || st.mtimeMs >= cutoff || sessions.has(basename(file, '.json'))) continue;
+    await unlink(join(STATUS_DIR, file)).catch(() => {});
+    statusMtimes.delete(file);
+    contexts.delete(basename(file, '.json'));
+    costs.delete(basename(file, '.json'));
+  }
+  saveSoon();
 }
 
 let broadcastTimer = null;
@@ -569,6 +608,8 @@ await scanStatusDir();
 setInterval(scanStatusDir, 2000);
 await loadState();
 await loadRecentSessions();
+await pruneOld(); // drops transcripts read while looking for recent sessions
+setInterval(() => pruneOld().catch((err) => console.error('Could not prune:', err.message)), 10 * 60_000);
 
 // Stop dashboard sessions' Claude processes with the server; they resume on your next message.
 for (const signal of ['SIGTERM', 'SIGINT']) {
