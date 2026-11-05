@@ -14,9 +14,11 @@ export function parseTranscript(text, { sidechain = false } = {}) {
     lastResponse: null,  // Claude's reply to the last prompt: its text after the last tool call
     lastResponseAt: null,
     turnEnded: false,    // Claude finished replying to the last prompt
+    messages: [],        // the conversation: { role: 'user' | 'assistant', ts, text }
   };
   let customTitle = null, aiTitle = null;
   let reply = [];        // text blocks since the last prompt or tool call
+  let said = null;       // Claude's chat message still being added to (no tool call since)
   const toolItems = new Map(); // tool_use id -> timeline item
 
   for (const line of text.split('\n')) {
@@ -44,6 +46,8 @@ export function parseTranscript(text, { sidechain = false } = {}) {
           if (p) {
             t.timeline.push({ ts: e.timestamp, ...p });
             if (p.kind === 'prompt') {
+              t.messages.push({ role: 'user', ts: e.timestamp, text: p.text });
+              said = null;
               t.lastPrompt = p.text;
               t.lastResponse = t.lastResponseAt = null;
               t.turnEnded = false;
@@ -66,11 +70,14 @@ export function parseTranscript(text, { sidechain = false } = {}) {
       for (const b of Array.isArray(m.content) ? m.content : []) {
         if (b?.type === 'text' && b.text?.trim()) {
           reply.push(b.text.trim());
+          if (said) said.text = `${said.text}\n\n${b.text.trim()}`.slice(0, MAX_RESPONSE);
+          else t.messages.push(said = { role: 'assistant', ts: e.timestamp, text: b.text.trim().slice(0, MAX_RESPONSE) });
           t.lastResponse = reply.join('\n\n').slice(0, MAX_RESPONSE);
           t.lastResponseAt = e.timestamp;
         }
         if (b?.type !== 'tool_use') continue;
         reply = []; // text before a tool call is narration, not the reply
+        said = null;
         t.lastResponse = t.lastResponseAt = null;
         const input = b.input ?? {};
         const item = { ts: e.timestamp, kind: 'tool', id: b.id, tool: b.name, text: describeTool(b.name, input) };

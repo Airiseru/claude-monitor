@@ -96,3 +96,19 @@ test('bare commands and compaction summaries are not the last prompt', () => {
   assert.equal(t.lastPrompt, 'Real question');
   assert.deepEqual(t.timeline.map((i) => i.kind), ['prompt', 'note', 'command']);
 });
+
+test('keeps the conversation as chat messages, splitting Claude’s text at tool calls', () => {
+  const chat = [
+    { type: 'user', timestamp: 't1', message: { role: 'user', content: 'Hi' } },
+    { type: 'assistant', timestamp: 't2', message: { content: [{ type: 'text', text: 'Checking.' }] } },
+    { type: 'assistant', timestamp: 't2', message: { content: [{ type: 'text', text: 'One sec.' }] } },
+    { type: 'assistant', timestamp: 't3', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: { command: 'ls' } }] } },
+    { type: 'user', timestamp: 't4', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'x', content: 'a' }] } },
+    { type: 'assistant', timestamp: 't5', message: { content: [{ type: 'text', text: 'Done.' }] } },
+  ].map((l) => JSON.stringify(l)).join('\n');
+  assert.deepEqual(parseTranscript(chat).messages, [
+    { role: 'user', ts: 't1', text: 'Hi' },
+    { role: 'assistant', ts: 't2', text: 'Checking.\n\nOne sec.' },
+    { role: 'assistant', ts: 't5', text: 'Done.' },
+  ]);
+});

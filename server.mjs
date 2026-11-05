@@ -541,7 +541,7 @@ async function handle(req, res) {
     const t = await readTranscript(s.transcriptPath);
     return sendJson(res, {
       ...summary(s), lastResponse: t.lastResponse, lastResponseAt: t.lastResponseAt, turnEnded: t.turnEnded,
-      timeline: t.timeline.slice(-500), files: [...t.files.values()], subagents: await readSubagents(s.transcriptPath),
+      timeline: t.timeline.slice(-500), messages: t.messages.slice(-300), files: [...t.files.values()], subagents: await readSubagents(s.transcriptPath),
     });
   }
 

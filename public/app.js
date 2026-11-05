@@ -34,6 +34,9 @@ let starting = null;         // { cwd, prompt, model } while a new session spins
 let renaming = null;         // { id, value, error, busy } while a title is being edited
 const filter = { text: '', project: '' }; // sidebar search and project filter
 const openAgents = new Set(); // Agent tool-call ids whose subagent work is expanded
+let detailTab = 'timeline';   // 'timeline' | 'chat': what the session panel shows below its header
+let chatToEnd = false;        // scroll the chat to its latest message on the next draw
+let copied = null;            // session id whose resume command was just copied
 
 // --- helpers -------------------------------------------------------------------------------
 
@@ -411,6 +414,7 @@ function select(id) {
   detail = null;
   detailVersion = null;
   openFiles.clear();
+  chatToEnd = detailTab === 'chat';
   render();
   if (id) loadDetail();
   document.getElementById('detail-content').scrollTop = 0;
@@ -522,6 +526,39 @@ document.getElementById('toggle-sidebar').addEventListener('click', () => {
   pref.set('sidebar', sidebarHidden ? 'hidden' : 'shown');
   renderToolbar();
 });
+
+// Sidebar width: drag the edge (or focus it and use ←/→); double-click resets. Saved per browser.
+const SIDEBAR = { min: 260, default: 380, max: () => Math.max(260, Math.min(720, window.innerWidth - 360)) };
+const resizer = document.getElementById('sidebar-resize');
+function setSidebarWidth(px, save = true) {
+  const w = Math.round(Math.min(Math.max(px, SIDEBAR.min), SIDEBAR.max()));
+  document.documentElement.style.setProperty('--sidebar-w', `${w}px`); // CSSOM: allowed by the CSP
+  resizer.setAttribute('aria-valuenow', w);
+  resizer.setAttribute('aria-valuemin', SIDEBAR.min);
+  resizer.setAttribute('aria-valuemax', SIDEBAR.max());
+  if (save) pref.set('sidebarWidth', w);
+}
+setSidebarWidth(Number(pref.get('sidebarWidth')) || SIDEBAR.default, false);
+resizer.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  resizer.setPointerCapture(e.pointerId);
+  const left = document.getElementById('sidebar').getBoundingClientRect().left;
+  const move = (ev) => setSidebarWidth(ev.clientX - left);
+  const up = () => { resizer.removeEventListener('pointermove', move); document.body.classList.remove('resizing'); };
+  document.body.classList.add('resizing');
+  resizer.addEventListener('pointermove', move);
+  resizer.addEventListener('pointerup', up, { once: true });
+  resizer.addEventListener('lostpointercapture', up, { once: true });
+});
+resizer.addEventListener('dblclick', () => setSidebarWidth(SIDEBAR.default));
+resizer.addEventListener('keydown', (e) => {
+  const step = { ArrowLeft: -20, ArrowRight: 20 }[e.key];
+  if (!step) return;
+  e.preventDefault();
+  e.stopPropagation();
+  setSidebarWidth(Number(resizer.getAttribute('aria-valuenow')) + step);
+});
+window.addEventListener('resize', () => setSidebarWidth(Number(pref.get('sidebarWidth')) || SIDEBAR.default, false));
 
 document.getElementById('notify').addEventListener('click', async () => {
   if (!notifyOn && Notification.permission !== 'granted') await Notification.requestPermission();
@@ -725,6 +762,8 @@ function renderDetail() {
     return;
   }
   const d = detail?.id === s.id ? detail : null;
+  // In the chat, stay pinned to the newest message if you were already at the bottom.
+  const atEnd = content.scrollHeight - scroll - content.clientHeight < 40;
   add(content,
     h('header', { class: 'detail-head' },
       h('div', { class: 'detail-title' },
@@ -732,6 +771,7 @@ function renderDetail() {
         renaming?.id === s.id ? renameForm(s)
           : [h('h1', {}, titleOf(s)), h('button', { class: 'link', onclick: () => startRename(s) }, 'Rename')]),
       h('div', { class: 'meta' }, [s.cwd && s.cwd.replace(/^\/Users\/[^/]+/, '~'), s.branch, s.model].filter(Boolean).join('  ·  ')),
+      sessionIdRow(s),
       stats(s, true),
       h('div', { class: 'detail-actions' },
         warpButton(),
@@ -739,13 +779,69 @@ function renderDetail() {
     needSection(s),
     s.status === 'working' && s.activity && h('p', { class: 'now' }, h('strong', {}, 'Now: '), s.activity),
     runningSubagents(d),
-    s.lastPrompt && h('section', { class: 'block' }, h('h2', {}, 'Last prompt'), h('p', { class: 'prompt' }, s.lastPrompt)),
-    d?.lastResponse && replySection(s, d),
-    !d ? h('p', { class: 'empty' }, 'Loading…')
-      : d.error ? h('p', { class: 'empty' }, d.error)
-        : [filesSection(d), timelineSection(d)],
+    detailTabs(),
+    h('div', { id: 'detail-panel', role: 'tabpanel', 'aria-labelledby': `tab-${detailTab}` },
+      detailTab === 'timeline' && [
+        s.lastPrompt && h('section', { class: 'block' }, h('h2', {}, 'Last prompt'), h('p', { class: 'prompt' }, s.lastPrompt)),
+        d?.lastResponse && replySection(s, d)],
+      !d ? h('p', { class: 'empty' }, 'Loading…')
+        : d.error ? h('p', { class: 'empty' }, d.error)
+          : detailTab === 'chat' ? chatSection(d) : [filesSection(d), timelineSection(d)]),
   );
-  content.scrollTop = scroll;
+  if (detailTab === 'chat' && (atEnd || chatToEnd)) {
+    content.scrollTop = content.scrollHeight;
+    if (d) chatToEnd = false;
+  } else {
+    content.scrollTop = scroll;
+  }
+}
+
+// The session id, and the command that resumes it in a terminal (e.g. a Warp tab).
+function sessionIdRow(s) {
+  const command = `claude --resume ${s.id}`;
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(command); copied = s.id; } catch { copied = null; }
+    renderDetail();
+    setTimeout(() => { if (copied === s.id) { copied = null; renderDetail(); } }, 1500);
+  };
+  return h('div', { class: 'session-id' },
+    h('span', { class: 'muted' }, 'Session'),
+    h('code', {}, s.id),
+    h('button', { class: 'link', onclick: copy, title: command, 'aria-label': `Copy “${command}”` },
+      copied === s.id ? 'Copied' : 'Copy resume command'));
+}
+
+function setTab(tab) {
+  if (tab === detailTab) return;
+  detailTab = tab;
+  chatToEnd = tab === 'chat';
+  renderDetail();
+  document.getElementById(`tab-${tab}`)?.focus();
+}
+
+function detailTabs() {
+  const tabs = [['timeline', 'Timeline'], ['chat', 'Chat history']];
+  return h('div', {
+    class: 'tabs', role: 'tablist', 'aria-label': 'Session view',
+    onkeydown: (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      const i = tabs.findIndex(([t]) => t === detailTab);
+      setTab(tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length][0]);
+    },
+  }, tabs.map(([tab, label]) => h('button', {
+    id: `tab-${tab}`, class: 'tab', role: 'tab', 'aria-selected': String(tab === detailTab),
+    'aria-controls': 'detail-panel', tabindex: tab === detailTab ? '0' : '-1', onclick: () => setTab(tab),
+  }, label)));
+}
+
+// The conversation, oldest first: your prompts and Claude's text replies (tool calls are in the timeline).
+function chatSection(d) {
+  const messages = d.messages ?? [];
+  if (!messages.length) return h('p', { class: 'muted' }, 'No messages yet.');
+  return h('ol', { class: 'chat' }, messages.map((m) => h('li', { class: `msg ${m.role}` },
+    h('div', { class: 'msg-meta' }, m.role === 'user' ? 'You' : 'Claude', m.ts && h('span', { class: 'muted' }, clock(m.ts))),
+    m.role === 'user' ? h('p', { class: 'msg-text' }, m.text) : h('div', { class: 'msg-text md' }, renderMarkdown(m.text)))));
 }
 
 function needSection(s) {
