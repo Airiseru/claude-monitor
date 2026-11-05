@@ -5,6 +5,7 @@
 //   idle      - seen in a recent transcript, but no live events since the monitor started
 //   ended     - the session exited
 import { describeTool, questionText } from './tools.mjs';
+import { withoutUploads } from './transcript.mjs';
 
 const DECISION_NOTIFICATIONS = new Set(['permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog', 'agent_needs_input']);
 
@@ -24,7 +25,10 @@ export function applyHook(sessions, ev, now) {
       break;
     case 'UserPromptSubmit':
       set(s, 'working');
-      if (ev.prompt) s.lastPrompt = ev.prompt;
+      if (ev.prompt) {
+        const { text, images } = withoutUploads(ev.prompt);
+        s.lastPrompt = [images && `[${images} image${images > 1 ? 's' : ''}]`, text].filter(Boolean).join(' ');
+      }
       break;
     case 'PreToolUse':
       if (ev.tool_name === 'AskUserQuestion') set(s, 'needs_you', { kind: 'question', message: questionText(ev.tool_input) });

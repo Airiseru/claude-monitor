@@ -128,6 +128,17 @@ test('prompts that carried images are marked, including images sent with no text
   assert.equal(t.lastPrompt, '[1 image]');
 });
 
+test('images sent from the page as file paths show as images, not paths', () => {
+  const up = (n) => `/Users/me/.claude-monitor/uploads/df51775a-43c6/1793850909792-${n}.png`;
+  const t = parseTranscript(jsonl([
+    { type: 'user', timestamp: '2026-11-04T03:00:00Z', message: { role: 'user', content: `What colour is this?\n${up(1)}\n${up(2)}` } },
+    { type: 'user', timestamp: '2026-11-04T03:01:00Z', message: { role: 'user', content: up(1) } },
+    { type: 'user', timestamp: '2026-11-04T03:02:00Z', message: { role: 'user', content: 'Look at /tmp/shot.png please' } },
+  ]));
+  assert.deepEqual(t.messages.map((m) => [m.text, m.images]), [['What colour is this?', 2], ['', 1], ['Look at /tmp/shot.png please', undefined]]);
+  assert.equal(t.timeline[1].text, '[1 image]');
+});
+
 // --- following a transcript file -----------------------------------------------------------
 
 const dir = mkdtempSync(join(tmpdir(), 'claude-monitor-transcript-'));

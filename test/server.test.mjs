@@ -1,14 +1,16 @@
 // End-to-end tests of server.mjs over HTTP. Each run starts the real server as a child process
 // with throwaway home, state and transcript folders. Nothing here starts Claude, Warp, an
-// editor or a dialog: endpoints that would are only checked for what they refuse.
+// editor or a dialog: endpoints that would are only checked for what they refuse. Sessions in
+// tmux run a stand-in for Claude Code, on a tmux socket of the tests' own (skipped without tmux).
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
+import { findTmux } from '../terminals.mjs';
 
 const SERVER = join(import.meta.dirname, '..', 'server.mjs');
 const SESSION = '11111111-2222-3333-4444-555555555555';
@@ -17,6 +19,10 @@ const home = join(root, 'home');
 const monitorHome = join(root, 'monitor');
 const projects = join(root, 'projects');
 const work = join(root, 'work');
+const fakeClaude = join(root, 'claude');
+const fakeLog = join(root, 'claude-log.txt');
+const tmux = findTmux();
+const tmuxSocket = `claude-monitor-test-server-${process.pid}`;
 let port, base, server, token;
 
 // --- helpers -------------------------------------------------------------------------------
@@ -58,7 +64,10 @@ async function waitFor(check, label, ms = 5000) {
 
 async function startServer() {
   server = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, HOME: home, CLAUDE_MONITOR_HOME: monitorHome, CLAUDE_PROJECTS_DIR: projects, PORT: String(port), PERMISSION_WAIT_MS: '1500' },
+    env: {
+      ...process.env, HOME: home, CLAUDE_MONITOR_HOME: monitorHome, CLAUDE_PROJECTS_DIR: projects, PORT: String(port), PERMISSION_WAIT_MS: '1500',
+      CLAUDE_MONITOR_TMUX: tmux ?? '', CLAUDE_MONITOR_TMUX_SOCKET: tmuxSocket, CLAUDE_MONITOR_CLAUDE: fakeClaude, SHELL: '/bin/sh', FAKE_LOG: fakeLog,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   server.stderr.on('data', (d) => process.stderr.write(`[server] ${d}`));
@@ -94,6 +103,20 @@ before(async () => {
     { type: 'assistant', timestamp: new Date().toISOString(), message: { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Done: **a.txt** changed.' }] } },
   ];
   writeFileSync(join(dir, `${SESSION}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  // A stand-in for Claude Code: records its arguments and what's typed into it, and writes the
+  // session file Claude Code would ($HOME is the throwaway home).
+  writeFileSync(fakeClaude, `#!/bin/bash
+id=""
+while [ $# -gt 0 ]; do
+  case "$1" in --session-id|--resume) id="$2"; shift 2 ;; --model) shift 2 ;; --) shift; break ;; *) break ;; esac
+done
+printf 'START %s %s\\n' "$id" "$*" >> "$FAKE_LOG"
+mkdir -p "$HOME/.claude/sessions"
+printf '{"sessionId":"%s","cwd":"%s"}' "$id" "$PWD" > "$HOME/.claude/sessions/$$.json"
+stty -echo
+exec cat >> "$FAKE_LOG"
+`);
+  chmodSync(fakeClaude, 0o755);
   port = await freePort();
   base = `http://127.0.0.1:${port}`;
   await startServer();
@@ -101,6 +124,7 @@ before(async () => {
 
 after(async () => {
   if (server.exitCode === null) await stopServer();
+  if (tmux) { try { execFileSync(tmux, ['-L', tmuxSocket, 'kill-server'], { stdio: 'ignore' }); } catch { /* not started */ } }
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -131,7 +155,7 @@ test('refuses other hosts, cross-site hook posts, bad JSON and unknown paths', a
 
 test('every page action needs the token and a same-origin Origin', async () => {
   for (const path of ['/api/hide', '/api/focus-warp', '/api/open-file', '/api/choose-folder', '/api/new-session',
-    `/api/sessions/${SESSION}/rename`, `/api/sessions/${SESSION}/send`, '/api/permissions/x']) {
+    `/api/sessions/${SESSION}/rename`, `/api/sessions/${SESSION}/send`, `/api/sessions/${SESSION}/key`, '/api/permissions/x']) {
     assert.equal((await act(path, {}, { withToken: false })).status, 403, `${path} without token`);
     assert.equal((await act(path, {}, { origin: 'https://evil.example' })).status, 403, `${path} from another site`);
   }
@@ -198,7 +222,9 @@ test('page actions validate their input', async () => {
   assert.equal((await act('/api/new-session', { cwd: work, prompt: '  ' })).status, 400);
   assert.equal((await act(`/api/sessions/${SESSION}/rename`, { title: '   ' })).status, 400);
   assert.equal((await act('/api/sessions/no-such-session/rename', { title: 'x' })).status, 404);
-  assert.equal((await act(`/api/sessions/${SESSION}/send`, { text: 'hi' })).status, 404, 'only sessions started here take prompts');
+  assert.equal((await act(`/api/sessions/${SESSION}/send`, { text: 'hi' })).status, 404, 'only sessions in the monitor’s tmux take messages');
+  assert.equal((await act(`/api/sessions/${SESSION}/key`, { key: 'enter' })).status, 404);
+  assert.equal((await request('GET', `/api/sessions/${SESSION}/screen`)).status, 404);
   assert.equal((await act('/api/open-file', { id: SESSION, path: '/etc/hosts' })).status, 404, 'only files the session changed');
   assert.equal((await act('/api/hide', { ids: ['../x'] })).status, 400);
   // Images are checked before anything starts.
@@ -206,6 +232,43 @@ test('page actions validate their input', async () => {
   assert.equal((await act('/api/new-session', { cwd: work, prompt: 'hi', images: [{ mediaType: 'image/svg+xml', data: 'AAAA' }] })).status, 400);
   assert.equal((await act('/api/new-session', { cwd: work, prompt: 'hi', images: [{ mediaType: 'image/png', data: 'not base64!' }] })).status, 400);
   assert.equal((await act('/api/new-session', { cwd: work, prompt: 'hi', images: Array(6).fill(png) })).status, 400, 'at most 5 images');
+});
+
+test('a session started from the page runs in tmux and takes messages, images and keys', { skip: !tmux && 'tmux not installed' }, async () => {
+  const log = () => { try { return readFileSync(fakeLog, 'utf8'); } catch { return ''; } };
+  const png = { mediaType: 'image/png', data: 'iVBORw0KGgo=' };
+  const res = await act('/api/new-session', { cwd: work, prompt: 'Hello there', images: [png] });
+  assert.equal(res.status, 200, res.body);
+  const { id } = JSON.parse(res.body);
+  const s = await waitFor(async () => (await request('GET', '/api/sessions')).json().find((x) => x.id === id), 'the new session');
+  assert.equal(s.status, 'working');
+  assert.equal(s.lastPrompt, '[1 image] Hello there');
+  assert.equal(s.terminal.live, true);
+  assert.equal(s.terminal.here, true);
+  assert.equal(s.terminal.attach, `tmux -L ${tmuxSocket} attach -t claude-${id.slice(0, 8)}`);
+  // The image is saved as a file, and its path goes in the prompt after the text.
+  const started = await waitFor(() => log().match(new RegExp(`START ${id} Hello there\n(\\S+\\.png)\n`)), 'Claude Code to start');
+  const image = started[1];
+  assert.ok(image.startsWith(join(monitorHome, 'uploads', id)), image);
+  assert.equal(readFileSync(image).toString('base64'), png.data);
+
+  await hook({ session_id: id, hook_event_name: 'Stop' });
+  assert.equal((await act(`/api/sessions/${id}/send`, { text: 'Second message' })).status, 200);
+  await waitFor(() => log().includes('Second message'), 'the message typed into the terminal');
+  assert.equal((await act(`/api/sessions/${id}/key`, { key: 'rm -rf' })).status, 400);
+  assert.equal((await act(`/api/sessions/${id}/key`, { key: 'escape' })).status, 200);
+  assert.equal((await request('GET', `/api/sessions/${id}/screen`)).status, 200);
+  // Waiting on a prompt: typing would pick options in it, so it's refused.
+  await hook({ session_id: id, hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Allow?' });
+  assert.equal((await act(`/api/sessions/${id}/send`, { text: 'no' })).status, 409);
+
+  assert.equal((await act(`/api/sessions/${id}/end`)).status, 200);
+  const ended = await waitFor(async () => { const x = (await request('GET', '/api/sessions')).json().find((y) => y.id === id); return x?.status === 'ended' && x; }, 'ended');
+  assert.equal(ended.terminal.live, false);
+  // A stopped session resumes on the next message, in a new tmux session.
+  assert.equal((await act(`/api/sessions/${id}/send`, { text: 'Back again' })).status, 200);
+  await waitFor(() => log().includes(`START ${id} Back again`), 'resumed with the message');
+  await act(`/api/sessions/${id}/end`);
 });
 
 test('usage limits come from the freshest status line snapshot', async () => {

@@ -1,0 +1,42 @@
+#!/bin/bash
+# Runs Claude Code inside Claude Monitor's tmux server, so the monitor page can send it
+# messages too. It looks and works like plain `claude` in your terminal. Use it in place of
+# `claude` with an alias in ~/.zshrc:
+#
+#   alias claude="$HOME/Documents/claude-monitor/bin/claude"
+#
+# Ctrl-b d detaches: Claude keeps running, and `tmux -L claude-monitor attach -t <name>` (or the
+# monitor page) gets back to it. Quitting Claude Code closes the tmux session as usual.
+#
+# It runs plain `claude` instead when tmux isn't installed, when it's already inside tmux, when
+# input or output isn't a terminal (scripts, pipes), and for print mode, --help, --version and
+# subcommands such as `claude mcp`.
+
+REAL="${CLAUDE_MONITOR_REAL_CLAUDE:-$HOME/.local/bin/claude}"
+HERE="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+TMUX_BIN="$(command -v tmux || ls /opt/homebrew/bin/tmux /usr/local/bin/tmux 2>/dev/null | head -1)"
+
+if [ -z "$TMUX_BIN" ] || [ -n "$TMUX" ] || [ ! -t 0 ] || [ ! -t 1 ]; then exec "$REAL" "$@"; fi
+for arg in "$@"; do
+  case "$arg" in
+    -p|--print|-h|--help|-v|--version) exec "$REAL" "$@" ;;
+  esac
+done
+case "$1" in
+  agents|attach|auth|auto-mode|doctor|gateway|import|install|logs|mcp|plugin|plugins|purge|respawn|rm|\
+  setup-token|stop|kill|ultrareview|update|upgrade) exec "$REAL" "$@" ;;
+esac
+
+# The tmux session's name: "claude-" and this folder's name, plus a number to keep it unique.
+folder="$(basename "$PWD" | tr -c 'A-Za-z0-9_-' '-' | cut -c1-24)"
+name="claude-${folder%-}-$RANDOM"
+
+# Pass this terminal's environment on (PATH and the rest), since the tmux server may have
+# been started by the monitor with a different one.
+env_args=()
+while IFS= read -r -d '' kv; do
+  case "$kv" in TMUX=*|TMUX_PANE=*|BASH_FUNC_*) continue ;; esac
+  env_args+=(-e "$kv")
+done < <(env -0)
+
+exec "$TMUX_BIN" -L claude-monitor -f "$HERE/../tmux.conf" new-session -s "$name" -c "$PWD" "${env_args[@]}" -- "$REAL" "$@"

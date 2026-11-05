@@ -51,3 +51,9 @@ test('rejects events without a safe session id', () => {
   assert.equal(applyHook(m, { session_id: '../etc', hook_event_name: 'Stop' }, 1), null);
   assert.equal(m.size, 0);
 });
+
+test('a prompt with images sent from the page shows the image count, not the paths', () => {
+  const sessions = new Map();
+  const s = applyHook(sessions, { session_id: 'a', hook_event_name: 'UserPromptSubmit', prompt: 'Which colour?\n/Users/me/.claude-monitor/uploads/a/1793850909792-1.png' }, 1);
+  assert.equal(s.lastPrompt, '[1 image] Which colour?');
+});

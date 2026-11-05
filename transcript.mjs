@@ -130,12 +130,17 @@ export class TranscriptReader {
       t.timeline.push({ ts: e.timestamp, kind: 'note', text: 'Context compacted: earlier conversation summarized' });
     } else if (e.type === 'user' && !e.isMeta) {
       const blocks = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : Array.isArray(m.content) ? m.content : [];
-      const images = blocks.filter((b) => b?.type === 'image').length; // pasted or attached with the prompt
+      let images = blocks.filter((b) => b?.type === 'image').length; // pasted or attached with the prompt
       let asked = null; // the prompt this entry adds to the chat, if any
       for (const b of blocks) {
         if (b?.type === 'text') {
           const p = classifyPrompt(b.text);
-          if (p) {
+          if (p?.kind === 'prompt') {
+            const u = withoutUploads(p.text);
+            images += u.images;
+            p.text = u.text;
+          }
+          if (p?.text) {
             t.timeline.push({ ts: e.timestamp, ...p });
             if (p.kind === 'prompt') {
               t.messages.push(asked = { role: 'user', ts: e.timestamp, text: p.text });
@@ -198,6 +203,15 @@ export class TranscriptReader {
       }
     }
   }
+}
+
+// Images sent from the monitor page reach Claude Code as file paths, one per line after the
+// text (see messageWithImages in server.mjs). Shown as a count, like pasted images.
+const UPLOAD_LINE = /^\/\S*\/uploads\/[\w-]+\/\d+-\d+\.(png|jpg|gif|webp)$/;
+export function withoutUploads(text) {
+  const lines = String(text ?? '').split('\n');
+  const kept = lines.filter((l) => !UPLOAD_LINE.test(l.trim()));
+  return { text: kept.join('\n').trim(), images: lines.length - kept.length };
 }
 
 // Classifies a user message as it was typed:

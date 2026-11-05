@@ -1,8 +1,8 @@
 # Claude Monitor
 
-A local dashboard for your Claude Code sessions: which ones need you, what each is doing, Claude's latest reply, context used and cost, and the files and commands it touched. You can answer permission prompts from the page, and start sessions there (picking the folder and model) that you reply to from the browser. Search and filter the list, rename sessions, and see what each subagent did. Sessions started from the page can be sent images (paste them into the message box). **Insights** in the header opens a popup listing sessions that look stuck or are near a full context window, and what you've spent per day at API prices. See `PLAN.md` for what's next and the constraints behind the design.
+A local dashboard for your Claude Code sessions: which ones need you, what each is doing, Claude's latest reply, context used and cost, and the files and commands it touched. You can answer permission prompts and Claude's questions from the page, and start sessions there (picking the folder and model) that you reply to from the browser. Those sessions run in tmux, so you can also open them in Warp. Search and filter the list, rename sessions, and see what each subagent did. You can send them images too (paste or drop them into the message box). **Insights** in the header opens a popup listing sessions that look stuck or are near a full context window, and what you've spent per day at API prices. See `PLAN.md` for what's next and the constraints behind the design.
 
-Needs Node 22+. One dependency, the Claude Agent SDK, for sessions started from the page:
+Needs Node 22+ and tmux (`brew install tmux`). One dependency, the Claude Agent SDK, for the model list, account and rename:
 
 ```
 npm install --omit=optional    # uses your installed ~/.local/bin/claude instead of a bundled copy
@@ -27,4 +27,5 @@ npm run hooks:uninstall     # removes exactly what hooks:install added, restores
 - State lives in `~/.claude-monitor/`: status line snapshots, `state.json` (live statuses and removed sessions, kept across restarts), and `server.log` when run as a service. The server listens on 127.0.0.1 only.
 - The login service runs the Node at the path you installed it with. If you switch Node versions (nvm), run `npm run service:install` again.
 - "Go to Warp" brings Warp to the front; Warp can't be told to switch to a specific tab from outside.
-- Sessions started from the page run your installed `claude` with your Claude login (personal use; see `PLAN.md`). Only those take replies from the browser; your Warp sessions stay monitor-only.
+- Sessions started from the page run your installed `claude` with your Claude login in the monitor's own tmux server. The page shows each one's attach command (`tmux -L claude-monitor attach -t <name>`) to open it in Warp; Ctrl-b d leaves it running.
+- To make sessions you start in Warp take messages from the page too, add `alias claude="$HOME/Documents/claude-monitor/bin/claude"` to `~/.zshrc`. It runs `claude` inside that tmux server and looks the same; scripts, `-p`, `--help` and subcommands run plain `claude`. Other Warp sessions stay monitor-only.

@@ -1,14 +1,15 @@
 // Claude Monitor server: receives hook events, watches status line snapshots, reads transcripts,
 // and serves the dashboard. Listens on 127.0.0.1 only.
 import { execFile } from 'node:child_process';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
-import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path';
-import { claudeInfo, DashboardSessions, setSessionTitle } from './agents.mjs';
+import { CLAUDE, claudeInfo, setSessionTitle } from './agents.mjs';
 import { PendingPermissions } from './permissions.mjs';
 import { applyHook } from './sessions.mjs';
+import { KEYS, Terminals } from './terminals.mjs';
 import { TranscriptFile } from './transcript.mjs';
 
 const PORT = Number(process.env.PORT ?? 4747);
@@ -16,6 +17,7 @@ const MONITOR_HOME = process.env.CLAUDE_MONITOR_HOME ?? join(homedir(), '.claude
 const PROJECTS_DIR = process.env.CLAUDE_PROJECTS_DIR ?? join(homedir(), '.claude', 'projects');
 const STATUS_DIR = join(MONITOR_HOME, 'status');
 const STATE_FILE = join(MONITOR_HOME, 'state.json'); // live statuses + removed sessions, kept across restarts
+const UPLOADS_DIR = join(MONITOR_HOME, 'uploads'); // images sent from the page, one folder per session
 const RECENT_MS = 36 * 3600_000;
 const MAX_HOOK_BODY = 5_000_000;
 // How long a permission request waits for a click. Just under the hook's 600 s timeout, so
@@ -41,12 +43,37 @@ const transcripts = new Map(); // transcript path -> TranscriptFile
 const clients = new Set();     // open SSE responses
 const pending = new PendingPermissions();
 const hidden = new Set();      // session ids removed from the list; back on their next event
-const dashboard = new DashboardSessions({
-  decide: decideInPage,
-  event: (ev) => { const s = applyHook(sessions, ev, Date.now()); if (s) { pending.settle(ev); refreshSoon(s.id); } broadcast(); },
-  changed: () => broadcast(),
-  cost: (id, usd) => recordCost(id, usd, Date.now()),
-});
+const terminals = new Terminals({ claude: CLAUDE, home: homedir(), conf: join(import.meta.dirname, 'tmux.conf'), changed: terminalsChanged });
+
+// An event the page itself causes (a prompt sent, a session started or stopped), applied as
+// the hooks would report it, so the list is right at once.
+function pageEvent(ev) {
+  const s = applyHook(sessions, ev, Date.now());
+  if (s) { pending.settle(ev); refreshSoon(s.id); }
+  broadcast();
+}
+
+// Which sessions run in tmux changed. A pane that's gone means Claude Code stopped (killed,
+// or exited before its SessionEnd hook could report it). A session still asking whether to
+// trust its folder needs you before it can start.
+const TRUST_MESSAGE = 'Claude Code asks whether you trust this folder before it starts. Answer it in the Terminal tab.';
+let wasLive = new Set();
+function terminalsChanged() {
+  const live = new Set([...terminals.owned.keys()].filter((id) => terminals.isLive(id)));
+  for (const [id, s] of sessions) {
+    if (!terminals.owned.has(id)) continue;
+    const trust = terminals.needsTrust(id);
+    if (trust && s.status !== 'needs_you') Object.assign(s, { status: 'needs_you', need: { kind: 'trust', message: TRUST_MESSAGE }, activity: null });
+    else if (!trust && s.need?.kind === 'trust') Object.assign(s, { status: 'working', need: null });
+    if (wasLive.has(id) && !live.has(id) && s.status !== 'ended') {
+      for (const p of pending.forSession(id)) pending.resolve(p.id, null);
+      Object.assign(s, { status: 'ended', need: null, activity: null });
+    }
+  }
+  wasLive = live;
+  saveSoon();
+  broadcast();
+}
 
 // --- spend ---------------------------------------------------------------------------------
 
@@ -84,24 +111,6 @@ function spendSummary(now = Date.now()) {
   return { today: sum(1), week: sum(7), month: sum(SPEND_DAYS), days, since };
 }
 
-// A dashboard session's permission prompt or question: shown in the page with no time limit
-// (there's no terminal to fall back to), answered by a click.
-function decideInPage(sessionId, tool, input, signal) {
-  return new Promise((resolve) => {
-    const ev = { session_id: sessionId, tool_name: tool, tool_input: input };
-    const id = pending.add(ev, (decision) => {
-      broadcast();
-      if (decision?.answers) resolve({ behavior: 'allow', updatedInput: { ...input, answers: decision.answers } });
-      else if (decision === 'allow') resolve({ behavior: 'allow', updatedInput: input });
-      else resolve({ behavior: 'deny', message: decision === 'deny' ? 'Denied from Claude Monitor' : 'No answer was given' });
-    });
-    signal?.addEventListener('abort', () => { pending.drop(id); broadcast(); }, { once: true });
-    // Same state change a terminal session gets from its hooks.
-    applyHook(sessions, { ...ev, hook_event_name: tool === 'AskUserQuestion' ? 'PreToolUse' : 'PermissionRequest' }, Date.now());
-    broadcast();
-  });
-}
-
 // --- saved state ---------------------------------------------------------------------------
 
 const SAVED_FIELDS = ['id', 'status', 'need', 'activity', 'cwd', 'transcriptPath', 'lastEventAt', 'lastPrompt'];
@@ -124,7 +133,9 @@ async function loadState() {
     const entry = typeof o === 'string' ? { cwd: o, model: null } : o; // older saves held just the folder
     if (!SESSION_ID.test(id) || typeof entry?.cwd !== 'string') continue;
     const num = (n) => (typeof n === 'number' && n > 0 ? n : null);
-    dashboard.owned.set(id, { cwd: entry.cwd, model: entry.model ?? null, contextWindow: num(entry.contextWindow), costUsd: num(entry.costUsd) });
+    // Sessions saved before tmux were all started here; their context window and cost came
+    // from the Agent SDK, and are kept for display.
+    terminals.owned.set(id, { cwd: entry.cwd, model: entry.model ?? null, here: entry.here ?? true, contextWindow: num(entry.contextWindow), costUsd: num(entry.costUsd) });
   }
   for (const [day, usd] of Object.entries(saved.spend?.days ?? {})) {
     if (/^\d{4}-\d\d-\d\d$/.test(day) && typeof usd === 'number') spend.days[day] = usd;
@@ -142,7 +153,7 @@ function saveSoon() {
     const state = {
       sessions: [...sessions.values()].map((s) => Object.fromEntries(SAVED_FIELDS.map((k) => [k, s[k] ?? null]))),
       hidden: [...hidden].filter((id) => sessions.has(id)), // others have aged out of the list anyway
-      owned: [...dashboard.owned].filter(([id]) => sessions.has(id)),
+      owned: [...terminals.owned].filter(([id]) => sessions.has(id)),
       spend,
     };
     const tmp = `${STATE_FILE}.tmp`;
@@ -286,9 +297,9 @@ async function loadStatus(file, mtimeMs = Date.now()) {
 
 function summary(s) {
   const t = transcripts.get(s.transcriptPath)?.latest;
-  // Sessions started here have no status line: their context is the transcript's latest token
-  // count against the model's window (from the SDK), and their cost comes from the SDK too.
-  const owned = dashboard.owned.get(s.id);
+  // Sessions started here before tmux had no status line: their context is the transcript's
+  // latest token count against the model's window, and their cost, both from the Agent SDK.
+  const owned = terminals.owned.get(s.id);
   const size = owned?.contextWindow ?? null;
   const context = contexts.get(s.id) ?? (t?.contextTokens
     ? { pct: size ? Math.min(100, (t.contextTokens / size) * 100) : null, size, tokens: t.contextTokens, model: null }
@@ -310,8 +321,9 @@ function summary(s) {
     transcriptUpdatedAt: t?.updatedAt ?? null,
     context,
     cost,
-    // Started here, so it takes prompts from the page; `live` is whether it's running right now.
-    dashboard: dashboard.owned.has(s.id) ? { live: dashboard.isLive(s.id) } : null,
+    // Runs (or ran) in the monitor's tmux, so it takes messages from the page. live: running
+    // right now; attach: the command that opens it in a terminal; here: started from the page.
+    terminal: owned ? { live: terminals.isLive(s.id), attach: terminals.attachCommand(s.id), here: Boolean(owned.here) } : null,
   };
 }
 
@@ -326,10 +338,11 @@ function list() {
 async function pruneOld(now = Date.now()) {
   const cutoff = now - RECENT_MS;
   for (const [id, s] of sessions) {
-    if (s.lastEventAt >= cutoff || dashboard.isLive(id) || pending.forSession(id).length) continue;
+    if (s.lastEventAt >= cutoff || terminals.isLive(id) || pending.forSession(id).length) continue;
     sessions.delete(id);
     hidden.delete(id);
-    dashboard.owned.delete(id);
+    terminals.owned.delete(id);
+    await rm(join(UPLOADS_DIR, id), { recursive: true, force: true });
     contexts.delete(id);
     costs.delete(id);
     clearTimeout(refreshTimers.get(id));
@@ -390,6 +403,8 @@ const MAX_IMAGES = 5;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_PROMPT_BODY = MAX_IMAGES * Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 300_000;
 
+const IMAGE_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+
 function readImages(images) {
   if (images === undefined) return [];
   if (!Array.isArray(images) || images.length > MAX_IMAGES) throw new HttpError(400, `Up to ${MAX_IMAGES} images per message`);
@@ -399,6 +414,27 @@ function readImages(images) {
     if (Buffer.byteLength(i.data, 'base64') > MAX_IMAGE_BYTES) throw new HttpError(400, 'Each image must be 5 MB or less');
     return { mediaType: i.mediaType, data: i.data };
   });
+}
+
+// A terminal can't be sent image data, so images are saved as files and their paths go in
+// the message, as when you drag an image into the terminal. Claude Code reads them from there.
+async function messageWithImages(id, text, images) {
+  if (!images.length) return text;
+  const dir = join(UPLOADS_DIR, id);
+  await mkdir(dir, { recursive: true });
+  const paths = [];
+  for (const [i, img] of images.entries()) {
+    const path = join(dir, `${Date.now()}-${i + 1}.${IMAGE_EXT[img.mediaType]}`);
+    await writeFile(path, Buffer.from(img.data, 'base64'));
+    paths.push(path);
+  }
+  return [text, ...paths].filter(Boolean).join('\n');
+}
+
+// How a message shows in the session list until the transcript has it.
+function promptText(text, images) {
+  const note = images.length ? `[${images.length} image${images.length > 1 ? 's' : ''}]` : '';
+  return [note, text].filter(Boolean).join(' ');
 }
 
 // --- HTTP ----------------------------------------------------------------------------------
@@ -434,22 +470,23 @@ function tokenMatches(given) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function hookDecision(decision) {
-  const d = decision === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message: 'Denied from Claude Monitor' };
+function hookDecision(decision, input) {
+  const d = decision?.answers ? { behavior: 'allow', updatedInput: { ...input, answers: decision.answers } }
+    : decision === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message: 'Denied from Claude Monitor' };
   return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: d } });
 }
 
 // Holds a PermissionRequest hook open until a click, a terminal answer, or the wait runs out.
 // An empty 200 means "no decision": the terminal prompt carries on as if the monitor weren't there.
 function holdPermission(ev, res) {
-  // No dashboard open: don't hold anything. Questions aren't Allow/Deny: a dashboard session's
-  // come through decideInPage, a terminal session's are answered in the terminal.
-  if (!clients.size || ev.tool_name === 'AskUserQuestion') return res.writeHead(200).end();
+  // No dashboard open: don't hold anything. Claude's questions (AskUserQuestion) are held too,
+  // and answered with the answers filled in.
+  if (!clients.size) return res.writeHead(200).end();
   let timer;
   const id = pending.add(ev, (decision) => {
     clearTimeout(timer);
     if (!res.writableEnded) {
-      if (decision) res.writeHead(200, { 'Content-Type': 'application/json' }).end(hookDecision(decision));
+      if (decision) res.writeHead(200, { 'Content-Type': 'application/json' }).end(hookDecision(decision, ev.tool_input ?? {}));
       else res.writeHead(200).end();
     }
     broadcast();
@@ -554,13 +591,17 @@ async function handle(req, res) {
       throw new HttpError(400, 'That folder doesn’t exist');
     }
     if (typeof prompt !== 'string' || (!prompt.trim() && !images.length)) throw new HttpError(400, 'Type a first prompt');
-    let id;
-    try { id = await dashboard.start({ cwd: dir, prompt: prompt.trim(), images, model }); } catch (err) { throw new HttpError(502, err.message); }
+    if (!terminals.available) throw new HttpError(400, 'tmux isn’t installed. Install it with: brew install tmux');
+    const id = randomUUID(); // known up front, so images can be saved before Claude Code starts
+    try {
+      await terminals.start({ cwd: dir, prompt: await messageWithImages(id, prompt.trim(), images), model, id });
+    } catch (err) { throw new HttpError(502, err.message); }
+    pageEvent({ session_id: id, cwd: dir, hook_event_name: 'UserPromptSubmit', prompt: promptText(prompt.trim(), images) });
     // Hooks report the transcript path too; this covers the moments before they do (or no hooks).
     const s = sessions.get(id);
     if (s) s.transcriptPath ??= join(PROJECTS_DIR, dir.replace(/[^a-zA-Z0-9]/g, '-'), `${id}.jsonl`);
     broadcast();
-    return sendJson(res, { id, auth: dashboard.lastAuth });
+    return sendJson(res, { id });
   }
 
   // Rename works for any session: it writes a title line to the transcript, as /rename does.
@@ -577,20 +618,42 @@ async function handle(req, res) {
     return sendJson(res, { ok: true, title: clean });
   }
 
-  const act = pathname.match(/^\/api\/sessions\/([\w-]+)\/(send|interrupt|end)$/);
+  const act = pathname.match(/^\/api\/sessions\/([\w-]+)\/(send|interrupt|end|key)$/);
   if (req.method === 'POST' && act) {
     const [, id, action] = act;
-    if (!dashboard.owned.has(id)) throw new HttpError(404, 'Only sessions started here take prompts from the page');
+    const owned = terminals.owned.get(id);
+    if (!owned) throw new HttpError(404, 'Only sessions running in the monitor’s tmux take messages from the page');
+    const live = terminals.isLive(id);
     if (action === 'send') {
       const { text = '', images: rawImages } = await readJson(req, MAX_PROMPT_BODY);
       const images = readImages(rawImages);
       if (typeof text !== 'string' || (!text.trim() && !images.length)) throw new HttpError(400, 'Type a message');
-      try { await dashboard.send(id, text.trim(), images); } catch (err) { throw new HttpError(502, err.message); }
-    } else if (action === 'interrupt') {
-      await dashboard.interrupt(id);
-    } else {
-      dashboard.end(id);
+      const message = await messageWithImages(id, text.trim(), images);
+      if (live) {
+        // Typing into a menu or dialog would pick options in it.
+        if (sessions.get(id)?.status === 'needs_you') throw new HttpError(409, 'Claude is waiting on a prompt. Answer it first (Terminal tab).');
+        try { await terminals.send(id, message); } catch (err) { throw new HttpError(502, err.message); }
+      } else {
+        // Stopped: resume it in a new tmux session, unless it's open somewhere else.
+        if (await terminals.openElsewhere(id)) throw new HttpError(409, 'This session is open in another terminal. Reply there.');
+        if (!owned.cwd) throw new HttpError(409, 'Don’t know which folder this session ran in');
+        try { await terminals.start({ cwd: owned.cwd, model: owned.model, prompt: message, resume: id }); } catch (err) { throw new HttpError(502, err.message); }
+      }
+      pageEvent({ session_id: id, hook_event_name: 'UserPromptSubmit', prompt: promptText(text.trim(), images) });
+      return sendJson(res, { ok: true });
     }
+    if (!live) throw new HttpError(409, 'This session isn’t running');
+    try {
+      if (action === 'interrupt') await terminals.key(id, 'escape');
+      else if (action === 'key') {
+        const { key } = await readJson(req, 1000);
+        if (!Object.hasOwn(KEYS, key)) throw new HttpError(400, 'Unknown key');
+        await terminals.key(id, key);
+      } else {
+        await terminals.end(id);
+        pageEvent({ session_id: id, hook_event_name: 'SessionEnd' });
+      }
+    } catch (err) { throw err instanceof HttpError ? err : new HttpError(502, err.message); }
     broadcast();
     return sendJson(res, { ok: true });
   }
@@ -638,7 +701,7 @@ async function handle(req, res) {
     const folders = [...new Set([...sessions.values()].sort((a, b) => b.lastEventAt - a.lastEventAt).map((s) => s.cwd).filter(Boolean))];
     const claude = await claudeInfo().catch((err) => { console.error('Could not read Claude Code account/models:', err.message); return null; });
     return sendJson(res, {
-      permissionHook, auth: dashboard.lastAuth, folders: folders.slice(0, 30),
+      permissionHook, tmux: terminals.available, folders: folders.slice(0, 30),
       account: claude?.account ?? null, models: claude?.models ?? [], editor: (await findEditor())?.name ?? null,
     });
   }
@@ -654,6 +717,13 @@ async function handle(req, res) {
   if (pathname === '/api/sessions') return sendJson(res, list());
   if (pathname === '/api/limits') return sendJson(res, limits);
   if (pathname === '/api/spend') return sendJson(res, spendSummary());
+
+  // What a session's terminal shows right now, for the page's Terminal tab.
+  const scr = pathname.match(/^\/api\/sessions\/([\w-]+)\/screen$/);
+  if (scr) {
+    if (!terminals.isLive(scr[1])) throw new HttpError(404, 'This session isn’t running in tmux');
+    return sendJson(res, { screen: await terminals.screen(scr[1]).catch(() => '') });
+  }
 
   const m = pathname.match(/^\/api\/sessions\/([\w-]+)$/);
   if (m) {
@@ -693,9 +763,12 @@ await loadRecentSessions();
 await pruneOld(); // drops transcripts read while looking for recent sessions
 setInterval(() => pruneOld().catch((err) => console.error('Could not prune:', err.message)), 10 * 60_000);
 
-// Stop dashboard sessions' Claude processes with the server; they resume on your next message.
+await terminals.refresh();
+setInterval(() => terminals.refresh().catch((err) => console.error('Could not list tmux sessions:', err.message)), 2000);
+
+// Sessions in tmux keep running when the server stops; it finds them again when it starts.
 for (const signal of ['SIGTERM', 'SIGINT']) {
-  process.on(signal, () => { dashboard.endAll(); process.exit(0); });
+  process.on(signal, () => process.exit(0));
 }
 
 server.on('error', (err) => {

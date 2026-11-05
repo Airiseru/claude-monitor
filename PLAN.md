@@ -20,16 +20,18 @@ What's left to build, and the findings any future change has to respect. Everyth
 - `~/.claude/projects/<dir>/<session>.jsonl` is an internal format that changes between versions. Only the detail view, titles, and Claude's reply depend on it, and the parser skips lines it doesn't understand. Status, context %, cost, and permissions come from hooks and the status line.
 - A reply is split over several entries, one content block each, each carrying a `stop_reason`. The reply to a prompt is the text after the last tool call, and `end_turn` marks a finished turn.
 
-**Dashboard sessions (Agent SDK)**
-- They run your installed `~/.local/bin/claude` with your Claude login. The monitor removes `ANTHROPIC_API_KEY` from their environment, and the page shows which credential the SDK reports. You chose this on 2026-11-04 for **personal use only**. Anthropic's terms say products built on the SDK should use an API key, so switch to one before sharing the monitor with anyone.
-- Keep `@anthropic-ai/claude-agent-sdk` pinned to the version matching the installed CLI (0.3.318 ↔ 2.1.318). It's installed with `--omit=optional`, so the SDK uses the installed `claude` instead of a bundled copy.
-- Never resume a session that's open in a terminal. Without forking, both write into one transcript. That's why only sessions started from the page take replies.
-- A server restart stops their Claude processes. Your next message resumes them, with the model they were started on.
-- The model list and the signed-in account (`supportedModels()`, `accountInfo()`) come from a Claude Code process that's never sent a prompt, loads no settings, and saves no transcript (no usage, no stray session). They're re-read after 5 minutes, so a `/login` account switch shows up.
-- Dashboard sessions always use whatever account Claude Code is signed into on that Mac; the monitor has no login of its own.
-- They have no terminal, so Claude Code never runs the status line for them: no context % or cost from there. Both come from the SDK's `result` message instead: `modelUsage[<session model>].contextWindow` (against the transcript's latest token count) and `total_cost_usd`, which is the session's running total and carries over on resume.
-- Spend per day (Insights) adds up how much each session's running total grew, from status lines and SDK results alike. The last total per session is kept in `state.json` for 30 days, so a restart or a resume doesn't count anything twice.
-- Rename writes one `custom-title` line to the transcript (the SDK's `renameSession`, as `/rename` does). It works for any session, Warp ones included.
+**Sessions in tmux** (replaced Agent SDK sessions on 2026-11-05; see commit af5cc93 for how those worked)
+- Sessions started from the page, and terminal sessions started through `bin/claude`, run real Claude Code in the monitor's own tmux server (socket `claude-monitor`, settings in `tmux.conf`), so your own tmux setup is untouched. You open one in Warp with `tmux -L claude-monitor attach -t <name>`; the page types messages into it.
+- A pane is matched to its session through `~/.claude/sessions/<pid>.json`, which Claude Code writes with its session id; the pane's process is Claude Code itself. Page-started sessions get their id up front with `--session-id`.
+- Messages go in as one bracketed paste, then Enter, so new lines don't submit early. The monitor then checks the screen: if the message is still in the input box (the last line starting with `❯`), it presses Enter once more, then reports a failure instead of "Sent". On 2026-11-05 one session ignored Enter twice and the cause wasn't found; it was the only one showing the wide "files changed" side panel.
+- Sending is refused while the session needs you: typing into a menu or dialog would pick options in it. The Terminal tab shows the screen and has buttons for the keys menus need.
+- A terminal can't take image data, so images are saved under `~/.claude-monitor/uploads/<session>/` and their paths go after the text, as when you drag an image into the terminal. Those paths show as "[n images]" in the page.
+- A stopped session resumes on the next message in a new tmux session, with `--resume`. Never resume one a Claude Code process outside this tmux server still has open: both would write into one transcript.
+- They're real terminal sessions, so the status line runs for them: context %, cost and usage limits come from it, as for any terminal session.
+- Claude Code asks whether to trust a folder it hasn't seen before. The page shows that as needing you, answered in the Terminal tab.
+- tmux sessions keep running when the server stops or restarts; the server finds them again.
+- The Agent SDK is still used for the model list and signed-in account (`supportedModels()`, `accountInfo()`, from a process that's never sent a prompt and saves nothing; re-read after 5 minutes) and for rename (`renameSession`, one `custom-title` line, as `/rename` writes). Keep `@anthropic-ai/claude-agent-sdk` pinned to the installed CLI's version (0.3.318 ↔ 2.1.318), installed with `--omit=optional`.
+- Spend per day (Insights) adds up how much each session's running total grew. The last total per session is kept in `state.json` for 30 days, so a restart or a resume doesn't count anything twice.
 
 **Security**
 - The server listens on 127.0.0.1 only and checks the `Host` header. Every page action (Allow/Deny, answers, new session, send, remove, Go to Warp) needs the per-run token and a same-origin `Origin`. Hook endpoints reject requests that carry an `Origin`.

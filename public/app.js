@@ -25,18 +25,20 @@ const openReplies = new Set(); // session ids whose long reply is expanded
 const answers = new Map();   // permission id -> 'sending' | 'allow' | 'deny' | 'gone' | error text
 const picks = new Map();     // question request id -> { [question]: Set of picked labels }
 const others = new Map();    // question request id -> { [question]: typed answer }
-const token = fetch('/api/token').then((r) => r.json()).then((d) => d.token);
+// The server makes a new token each time it starts, so a refusal is retried once with a fresh one.
+const fetchToken = () => fetch('/api/token').then((r) => r.json()).then((d) => d.token);
+let token = fetchToken();
 let permissionHookInstalled = true; // refreshed from /api/setup whenever a prompt can't be answered here
-let setup = { auth: null, folders: [], models: [] }; // from /api/setup: login in use, recent folders, models
+let setup = { tmux: true, folders: [], models: [] }; // from /api/setup: tmux installed, recent folders, models
 let newSessionOpen = false;
 const newDraft = { cwd: '', prompt: '', model: 'default', error: null, images: [] };
 let starting = null;         // { cwd, prompt, model } while a new session spins up
 let renaming = null;         // { id, value, error, busy } while a title is being edited
 const filter = { text: '', project: '' }; // sidebar search and project filter
 const openAgents = new Set(); // Agent tool-call ids whose subagent work is expanded
-let detailTab = 'timeline';   // 'timeline' | 'chat': what the session panel shows below its header
+let detailTab = 'timeline';   // 'timeline' | 'chat' | 'terminal': what the session panel shows below its header
 let chatToEnd = false;        // scroll the chat to its latest message on the next draw
-let copied = null;            // session id whose resume command was just copied
+let copied = null;            // which command was just copied: 'resume:<id>' or 'attach:<id>'
 
 // --- helpers -------------------------------------------------------------------------------
 
@@ -68,11 +70,15 @@ const pref = {
 
 // Every action the page takes goes through here: same-origin, with this run's token.
 async function post(path, body = {}) {
-  return fetch(path, {
+  const send = async () => fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Monitor-Token': await token },
     body: JSON.stringify(body),
   });
+  const res = await send();
+  if (res.status !== 403) return res;
+  token = fetchToken(); // the server restarted since this page loaded
+  return send();
 }
 
 const folder = (cwd) => (cwd ? cwd.split('/').filter(Boolean).pop() : null);
@@ -80,16 +86,15 @@ const shortPath = (path, cwd) => (cwd && path.startsWith(cwd + '/') ? path.slice
 const tokens = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
 const usd = (n) => (n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`);
 
-// Context bar plus cost, side by side. Cost is the session's tokens at API prices: an estimate
-// of usage, not a bill, on a subscription.
-function stats(s, large = false) {
+// Context bar plus cost, side by side, in the session's detail. Cost is the session's tokens at
+// API prices: an estimate of usage, not a bill, on a subscription.
+function stats(s) {
   const c = s.cost;
-  const cost = c?.usd != null && (large
-    ? `≈ ${usd(c.usd)} at API prices${c.linesAdded != null ? ` · +${c.linesAdded.toLocaleString()} / −${(c.linesRemoved ?? 0).toLocaleString()} lines` : ''}`
-    : usd(c.usd));
-  const bar = contextBar(s.context, large);
+  const cost = c?.usd != null &&
+    `≈ ${usd(c.usd)} at API prices${c.linesAdded != null ? ` · +${c.linesAdded.toLocaleString()} / −${(c.linesRemoved ?? 0).toLocaleString()} lines` : ''}`;
+  const bar = contextBar(s.context, true);
   if (!bar && !cost) return null;
-  return h('div', { class: `stats${large ? ' large' : ''}` }, bar, cost && h('span', { class: 'ctx-text' }, cost));
+  return h('div', { class: 'stats large' }, bar, cost && h('span', { class: 'ctx-text' }, cost));
 }
 const imagesNote = (n) => `${n} image${n > 1 ? 's' : ''} attached`;
 const clock = (ts) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -105,24 +110,20 @@ function titleOf(s) {
   return s.title || (s.lastPrompt && s.lastPrompt.slice(0, 70)) || folder(s.cwd) || s.id.slice(0, 8);
 }
 
-function lineOf(s) {
-  if (s.need) return s.need.message || (s.need.kind === 'permission' ? 'Permission needed' : 'Question for you');
-  if (s.status === 'working' && s.activity) return s.activity;
-  if (s.status !== 'working' && s.lastResponse) return `Claude: ${toPlainText(s.lastResponse)}`;
-  return s.lastPrompt ? `You: ${s.lastPrompt}` : '';
-}
+const needLine = (need) => need.message || (need.kind === 'permission' ? 'Permission needed' : 'Question for you');
 
+// Large (detail): the full label. Small (sidebar card): just the percentage, full label on hover.
 function contextBar(c, large = false) {
   if (!c) return null;
-  if (c.pct == null) return c.tokens ? h('div', { class: 'ctx' }, h('span', { class: 'ctx-text' }, `${tokens(c.tokens)} tokens in context`)) : null;
+  if (c.pct == null) return c.tokens ? h('div', { class: 'ctx' }, h('span', { class: 'ctx-text' }, `${tokens(c.tokens)} tokens${large ? ' in context' : ''}`)) : null;
   const pct = Math.round(c.pct);
   const level = pct >= 80 ? 'high' : pct >= 60 ? 'mid' : 'low';
-  const label = c.size ? `${pct}% context · ${tokens(c.tokens ?? (c.pct / 100) * c.size)} of ${tokens(c.size)}` : `${pct}% context`;
+  const full = c.size ? `${pct}% context · ${tokens(c.tokens ?? (c.pct / 100) * c.size)} of ${tokens(c.size)}` : `${pct}% context`;
   const fill = h('div', { class: `ctx-fill ${level}` });
   fill.style.width = `${Math.min(pct, 100)}%`; // via CSSOM: the CSP blocks style attributes
-  return h('div', { class: `ctx ${large ? 'large' : ''}` },
+  return h('div', { class: `ctx ${large ? 'large' : ''}`, title: large ? null : full },
     h('div', { class: 'ctx-track', role: 'meter', 'aria-valuenow': pct, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-label': 'Context used' }, fill),
-    h('span', { class: 'ctx-text' }, label));
+    h('span', { class: 'ctx-text' }, large ? full : `${pct}%`));
 }
 
 // --- actions -------------------------------------------------------------------------------
@@ -180,7 +181,7 @@ function permissionActions(p) {
 
 const warpButton = () => h('button', { class: 'btn', onclick: goToWarp }, 'Go to Warp');
 
-// Claude's AskUserQuestion, answered from the page (dashboard sessions only): pick options, or
+// Claude's AskUserQuestion, answered from the page (held by the permission hook): pick options, or
 // type your own answer, for each question.
 function questionForm(p) {
   const state = answers.get(p.id);
@@ -328,7 +329,7 @@ function acceptImages(zone, onFiles) {
   });
 }
 
-// --- reply box (dashboard sessions) --------------------------------------------------------
+// --- reply box (sessions in the monitor's tmux) ----------------------------------------------
 
 const drafts = new Map(); // session id -> unsent reply text
 const attached = new Map(); // session id -> images attached to the unsent reply
@@ -345,7 +346,7 @@ const composer = {
 };
 
 function renderComposer(s) {
-  const show = Boolean(s?.dashboard) && !newSessionOpen;
+  const show = Boolean(s?.terminal) && !newSessionOpen;
   composer.form.hidden = !show;
   if (!show) { composer.sessionId = null; return; }
   if (composer.sessionId !== s.id) { // switched session: swap in that session's draft
@@ -354,10 +355,10 @@ function renderComposer(s) {
     composer.status.textContent = '';
     renderComposerImages();
   }
-  const live = s.dashboard.live;
-  composer.note.textContent = live
-    ? (s.status === 'working' ? 'Claude is working. What you send now goes after this turn.' : '')
-    : 'This session isn’t running. Sending a message starts it again where it left off.';
+  const live = s.terminal.live;
+  composer.note.textContent = !live ? 'This session isn’t running. Sending a message starts it again where it left off, in a new terminal session.'
+    : s.status === 'needs_you' ? 'Claude is waiting on a prompt. Answer it above or in the Terminal tab first.'
+      : s.status === 'working' ? 'Claude is working. What you send now is queued for after this turn.' : '';
   composer.note.hidden = !composer.note.textContent;
   composer.stop.hidden = !(live && s.status === 'working');
   composer.end.hidden = !live;
@@ -520,8 +521,10 @@ function renderList() {
   renderToolbar();
 }
 
+// Kept short: title, how long ago, folder and context. A request waiting on you also gets its line.
 function card(s) {
-  const meta = [folder(s.cwd), s.branch, s.dashboard && 'started here'].filter(Boolean).join(' · ');
+  const dir = folder(s.cwd);
+  const ctx = contextBar(s.context);
   const removable = !LIVE.has(s.status);
   const p = s.permissions[0];
   const actions = p
@@ -538,9 +541,8 @@ function card(s) {
         h('span', { class: 'dot', 'aria-hidden': 'true' }),
         h('span', { class: 'card-title' }, titleOf(s)),
         h('span', { class: 'ago' }, ago(s.lastEventAt))),
-      meta && h('div', { class: 'card-meta' }, meta),
-      h('div', { class: `card-line ${s.need ? 'need-line' : ''}` }, lineOf(s)),
-      stats(s)),
+      (dir || ctx) && h('div', { class: 'card-meta' }, h('span', { class: 'card-dir' }, dir || ''), ctx),
+      s.need && h('div', { class: 'card-line need-line' }, needLine(s.need))),
     removable && h('button', { class: 'card-remove', 'aria-label': `Remove “${titleOf(s)}” from the list`, onclick: () => removeSessions([s.id]) }, '×'),
     actions && h('div', { class: 'card-actions' }, actions));
 }
@@ -844,9 +846,9 @@ const versionOf = (s) => (s ? `${s.lastEventAt}|${s.transcriptUpdatedAt}` : null
 
 async function checkSetup() {
   try {
-    const { permissionHook, auth, folders, models, account, editor } = await (await fetch('/api/setup')).json();
+    const { permissionHook, tmux, folders, models, account, editor } = await (await fetch('/api/setup')).json();
     const editorChanged = editor !== setup.editor;
-    setup = { auth, folders: folders ?? [], models: models ?? [], account, editor };
+    setup = { tmux, folders: folders ?? [], models: models ?? [], account, editor };
     if (editorChanged) renderDetail();
     if (permissionHook !== permissionHookInstalled) { permissionHookInstalled = permissionHook; renderDetail(); }
   } catch {
@@ -906,7 +908,7 @@ const modelName = (value) => (value && value !== 'default'
 // Which account dashboard sessions use, in words: whatever Claude Code is signed into.
 // apiKeySource 'none' (or absent) means no API key, so it's the Claude login.
 function authText() {
-  const source = setup.account?.apiKeySource ?? setup.auth;
+  const source = setup.account?.apiKeySource;
   if (source === 'ANTHROPIC_API_KEY' || source === 'apiKeyHelper') return 'an API key, billed per token to that API account';
   const a = setup.account;
   if (!a?.email) return 'the Claude account Claude Code is signed into, as in the terminal';
@@ -971,8 +973,9 @@ function newSessionForm() {
   promptInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.target.form.requestSubmit(); });
   const form = h('form', { class: 'new-form', onsubmit: startNewSession },
     h('h1', {}, 'New session'),
-    h('p', { class: 'muted' }, 'Starts Claude Code in a folder and lets you reply from this page. Its permission prompts and questions show up here. It runs with ',
+    h('p', { class: 'muted' }, 'Starts Claude Code in a terminal session (tmux) in a folder. Reply from this page, or open the session in Warp with its attach command and carry on there. It runs with ',
       authText(), '.'),
+    !setup.tmux && h('p', { class: 'form-error', role: 'alert' }, 'tmux isn’t installed, and sessions run in it. Install it with: brew install tmux'),
     h('label', { for: 'new-cwd' }, 'Folder'),
     h('div', { class: 'folder-row' },
       h('span', { class: 'select-wrap' }, cwdSelect),
@@ -986,7 +989,7 @@ function newSessionForm() {
     note,
     newDraft.error && h('p', { class: 'form-error', role: 'alert' }, newDraft.error),
     h('div', { class: 'detail-actions' },
-      h('button', { type: 'submit', class: 'btn allow' }, 'Start session'),
+      h('button', { type: 'submit', class: 'btn allow', disabled: !setup.tmux }, 'Start session'),
       h('button', { type: 'button', class: 'btn', onclick: () => { newSessionOpen = false; render(); } }, 'Cancel')));
   acceptImages(form, attach);
   return form;
@@ -1033,6 +1036,7 @@ function renderDetail() {
     return;
   }
   const d = detail?.id === s.id ? detail : null;
+  if (detailTab === 'terminal' && !s.terminal?.live) detailTab = 'timeline';
   // In the chat, stay pinned to the newest message if you were already at the bottom.
   const atEnd = content.scrollHeight - scroll - content.clientHeight < 40;
   add(content,
@@ -1043,21 +1047,23 @@ function renderDetail() {
           : [h('h1', {}, titleOf(s)), h('button', { class: 'link', onclick: () => startRename(s) }, 'Rename')]),
       h('div', { class: 'meta' }, [s.cwd && s.cwd.replace(/^\/Users\/[^/]+/, '~'), s.branch, s.model].filter(Boolean).join('  ·  ')),
       sessionIdRow(s),
-      stats(s, true),
+      stats(s),
       h('div', { class: 'detail-actions' },
+        s.terminal?.attach && copyButton(`attach:${s.id}`, s.terminal.attach, 'Copy attach command', 'btn',
+          'Paste it into a Warp tab to open this session’s terminal'),
         warpButton(),
         !LIVE.has(s.status) && h('button', { class: 'btn', onclick: () => removeSessions([s.id]) }, 'Remove from list'))),
     needSection(s),
     s.status === 'working' && s.activity && h('p', { class: 'now' }, h('strong', {}, 'Now: '), s.activity),
     runningSubagents(d),
-    detailTabs(),
+    detailTabs(s),
     h('div', { id: 'detail-panel', role: 'tabpanel', 'aria-labelledby': `tab-${detailTab}` },
       detailTab === 'timeline' && [
         s.lastPrompt && h('section', { class: 'block' }, h('h2', {}, 'Last prompt'), h('p', { class: 'prompt' }, s.lastPrompt)),
         d?.lastResponse && replySection(s, d)],
       !d ? h('p', { class: 'empty' }, 'Loading…')
         : d.error ? h('p', { class: 'empty' }, d.error)
-          : detailTab === 'chat' ? chatSection(d) : [filesSection(d), timelineSection(d)]),
+          : detailTab === 'chat' ? chatSection(d) : detailTab === 'terminal' ? terminalSection(s) : [filesSection(d), timelineSection(d)]),
   );
   if (detailTab === 'chat' && (atEnd || chatToEnd)) {
     content.scrollTop = content.scrollHeight;
@@ -1067,19 +1073,23 @@ function renderDetail() {
   }
 }
 
-// The session id, and the command that resumes it in a terminal (e.g. a Warp tab).
-function sessionIdRow(s) {
-  const command = `claude --resume ${s.id}`;
+// Copies a command, and says so for a moment.
+function copyButton(key, command, label, cls = 'link', title = command) {
   const copy = async () => {
-    try { await navigator.clipboard.writeText(command); copied = s.id; } catch { copied = null; }
+    try { await navigator.clipboard.writeText(command); copied = key; } catch { copied = null; }
     renderDetail();
-    setTimeout(() => { if (copied === s.id) { copied = null; renderDetail(); } }, 1500);
+    setTimeout(() => { if (copied === key) { copied = null; renderDetail(); } }, 1500);
   };
+  return h('button', { class: cls, onclick: copy, title, 'aria-label': `Copy “${command}”` }, copied === key ? 'Copied' : label);
+}
+
+// The session id, and the command that resumes it in a terminal (e.g. a Warp tab). A session
+// running in the monitor's tmux is opened with its attach command instead.
+function sessionIdRow(s) {
   return h('div', { class: 'session-id' },
     h('span', { class: 'muted' }, 'Session'),
     h('code', {}, s.id),
-    h('button', { class: 'link', onclick: copy, title: command, 'aria-label': `Copy “${command}”` },
-      copied === s.id ? 'Copied' : 'Copy resume command'));
+    !s.terminal?.live && copyButton(`resume:${s.id}`, `claude --resume ${s.id}`, 'Copy resume command'));
 }
 
 // The tabs stay pinned to the top while you scroll. Switching tabs from further down shows the
@@ -1092,13 +1102,14 @@ function setTab(tab) {
   const pinned = tabs && content.scrollTop > tabs.offsetTop;
   detailTab = tab;
   chatToEnd = tab === 'chat';
+  if (tab === 'terminal') setTimeout(loadScreen, 0);
   renderDetail();
   if (pinned && tab !== 'chat') content.scrollTop = content.querySelector('.tabs')?.offsetTop ?? 0;
   document.getElementById(`tab-${tab}`)?.focus({ preventScroll: true });
 }
 
-function detailTabs() {
-  const tabs = [['timeline', 'Timeline'], ['chat', 'Chat history']];
+function detailTabs(s) {
+  const tabs = [['timeline', 'Timeline'], ['chat', 'Chat history'], ...(s.terminal?.live ? [['terminal', 'Terminal']] : [])];
   return h('div', {
     class: 'tabs', role: 'tablist', 'aria-label': 'Session view',
     onkeydown: (e) => {
@@ -1123,6 +1134,51 @@ function chatSection(d) {
     m.role === 'user' ? m.text && h('p', { class: 'msg-text' }, m.text) : h('div', { class: 'msg-text md' }, renderMarkdown(m.text)))));
 }
 
+// --- terminal tab (sessions running in the monitor's tmux) ----------------------------------
+
+// What the session's terminal shows, refreshed every second or so while the tab is open, and
+// buttons for the keys Claude Code's menus and dialogs need.
+const TERMINAL_KEYS = [['enter', 'Enter'], ['escape', 'Esc'], ['up', '↑'], ['down', '↓'], ['tab', 'Tab'], ['shift-tab', '⇧Tab'], ['1', '1'], ['2', '2'], ['3', '3']];
+const screen = { id: null, text: '', error: null };
+
+function terminalSection(s) {
+  const pre = h('pre', { id: 'terminal-screen', class: 'terminal-screen', 'aria-label': 'Terminal screen', 'aria-live': 'off' },
+    screen.id === s.id ? screen.text || ' ' : 'Loading…');
+  return h('section', { class: 'block terminal' },
+    h('div', { class: 'terminal-keys', role: 'group', 'aria-label': 'Press a key in the terminal' },
+      h('span', { class: 'muted small' }, 'Press'),
+      TERMINAL_KEYS.map(([key, label]) => h('button', { class: 'btn key', onclick: () => pressKey(s.id, key) }, label))),
+    pre,
+    h('p', { id: 'terminal-error', class: 'form-error', role: 'alert', hidden: !screen.error }, screen.error ?? ''),
+    h('p', { class: 'hint' }, 'To type here yourself, open it in Warp: copy the attach command above and paste it into a tab. Ctrl-b d leaves it running.'));
+}
+
+async function loadScreen() {
+  const s = sessions.find((x) => x.id === selectedId);
+  if (detailTab !== 'terminal' || !s?.terminal?.live) return;
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(s.id)}/screen`);
+    if (!res.ok) throw new Error((await res.text()) || `Error ${res.status}`);
+    const { screen: text } = await res.json();
+    if (selectedId !== s.id) return;
+    Object.assign(screen, { id: s.id, text, error: null });
+  } catch (err) {
+    Object.assign(screen, { id: s.id, error: err.message });
+  }
+  // Update in place: a full redraw would interrupt typing and reset scrolling.
+  const pre = document.getElementById('terminal-screen');
+  if (pre) pre.textContent = screen.text || ' ';
+  const error = document.getElementById('terminal-error');
+  if (error) { error.textContent = screen.error ?? ''; error.hidden = !screen.error; }
+}
+setInterval(loadScreen, 1200);
+
+async function pressKey(id, key) {
+  const res = await post(`/api/sessions/${encodeURIComponent(id)}/key`, { key }).catch(() => null);
+  screen.error = res?.ok ? null : res ? (await res.text()) || `Error ${res.status}` : 'Couldn’t reach the monitor server';
+  setTimeout(loadScreen, 150);
+}
+
 function needSection(s) {
   const questions = s.permissions.filter((p) => p.questions);
   const requests = s.permissions.filter((p) => !p.questions);
@@ -1133,11 +1189,20 @@ function needSection(s) {
       requests.map((p) => h('div', { class: 'perm' },
         h('div', { class: 'perm-head' }, h('strong', {}, p.summary), permissionActions(p)),
         h('pre', { class: 'perm-input' }, p.input))),
-      h('p', { class: 'hint' }, s.dashboard
-        ? 'This session was started here, so it waits for your answer on this page.'
+      h('p', { class: 'hint' }, s.terminal?.live
+        ? 'You can also answer in its terminal (the Terminal tab). Whichever answer comes first is used.'
         : 'You can also answer in the terminal. Whichever answer comes first is used.'));
   }
   if (!s.need) return null;
+  // Running in the monitor's tmux: the Terminal tab shows the prompt and can press its keys.
+  if (s.terminal?.live) {
+    return h('section', { class: 'need-box' },
+      h('h2', {}, s.need.kind === 'permission' ? 'Permission needed' : s.need.kind === 'trust' ? 'Trust this folder?' : 'Question for you'),
+      h('p', {}, s.need.message || ''),
+      h('div', { class: 'need-foot' },
+        h('p', { class: 'hint' }, 'Answer it in the Terminal tab: it shows the prompt, with buttons for the keys it needs.'),
+        detailTab !== 'terminal' && h('button', { class: 'btn', onclick: () => setTab('terminal') }, 'Open Terminal tab')));
+  }
   const hint = s.need.kind !== 'permission' ? 'Answer it in this session’s Warp tab.'
     : permissionHookInstalled
       ? 'This prompt can only be answered in the session’s Warp tab (sandbox prompts can’t be answered from here).'
@@ -1319,4 +1384,4 @@ function render() {
 render();
 connect();
 checkSetup(); // editor name for "Open in …", account for the New session form
-setInterval(() => { renderList(); renderInsights(); }, 30_000); // keep "5m ago" and "quiet for" fresh
+setInterval(() => { renderList(); renderInsights(); renderLimits(); }, 30_000); // keep "5m ago", "quiet for" and stale limits fresh
