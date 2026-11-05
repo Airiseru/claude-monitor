@@ -27,6 +27,8 @@ What's left to build, and the findings any future change has to respect. Everyth
 - A server restart stops their Claude processes. Your next message resumes them, with the model they were started on.
 - The model list and the signed-in account (`supportedModels()`, `accountInfo()`) come from a Claude Code process that's never sent a prompt, loads no settings, and saves no transcript (no usage, no stray session). They're re-read after 5 minutes, so a `/login` account switch shows up.
 - Dashboard sessions always use whatever account Claude Code is signed into on that Mac; the monitor has no login of its own.
+- They have no terminal, so Claude Code never runs the status line for them: no context % or cost from there. Both come from the SDK's `result` message instead: `modelUsage[<session model>].contextWindow` (against the transcript's latest token count) and `total_cost_usd`, which is the session's running total and carries over on resume.
+- Spend per day (Insights) adds up how much each session's running total grew, from status lines and SDK results alike. The last total per session is kept in `state.json` for 30 days, so a restart or a resume doesn't count anything twice.
 - Rename writes one `custom-title` line to the transcript (the SDK's `renameSession`, as `/rename` does). It works for any session, Warp ones included.
 
 **Security**

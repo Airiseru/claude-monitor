@@ -9,7 +9,16 @@ import { join } from 'node:path';
 const CLAUDE = join(homedir(), '.local', 'bin', 'claude');
 const START_TIMEOUT_MS = 60_000;
 
-const userMessage = (text) => ({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null });
+// A prompt: text, plus any images ({ mediaType, data: base64 }) placed before it, as when you
+// paste them in the terminal.
+export function promptContent(text, images = []) {
+  if (!images.length) return text;
+  return [
+    ...images.map((i) => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })),
+    ...(text ? [{ type: 'text', text }] : []),
+  ];
+}
+const userMessage = (content) => ({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
 
 // Prompts waiting to be sent: an async iterable that stays open between turns, which is what
 // keeps an SDK session alive for follow-up messages.
@@ -18,7 +27,7 @@ class Inbox {
   #wake = null;
   #closed = false;
 
-  push(text) { this.#queue.push(userMessage(text)); this.#wake?.(); }
+  push(content) { this.#queue.push(userMessage(content)); this.#wake?.(); }
   close() { this.#closed = true; this.#wake?.(); }
 
   async *[Symbol.asyncIterator]() {
@@ -73,28 +82,40 @@ export function claudeInfo() {
 // No call to Claude.
 export const setSessionTitle = (sessionId, title) => renameSession(sessionId, title);
 
+// How a prompt shows in the session list until the transcript has it.
+function promptText(text, images) {
+  const note = images.length ? `[${images.length} image${images.length > 1 ? 's' : ''}]` : '';
+  return [note, text].filter(Boolean).join(' ');
+}
+
 export class DashboardSessions {
   #live = new Map(); // session id -> { q, inbox }
-  owned = new Map(); // session id -> { cwd, model }, for every session started here (kept across restarts)
+  // session id -> { cwd, model, contextWindow, costUsd }, for every session started here (kept
+  // across restarts). These sessions have no terminal, so no status line reports their context
+  // and cost; both come from the SDK's result message instead.
+  owned = new Map();
   lastAuth = null;   // where the last session's credential came from (SDK apiKeySource), e.g. 'none' = your login
 
   // decide(sessionId, toolName, input, signal) -> Promise<PermissionResult>: asks you in the page.
   // event(hookShapedEvent): a turn started or ended, reported like the hooks would, so status
   //   is right even without the hooks installed.
   // changed(): something about these sessions changed, so redraw.
-  constructor({ decide, event, changed }) {
+  // cost(sessionId, usd): the session's running cost total, after each turn.
+  constructor({ decide, event, changed, cost = () => {} }) {
     this.decide = decide;
     this.event = event;
     this.changed = changed;
+    this.cost = cost;
   }
 
   isLive(id) { return this.#live.has(id); }
 
   // Starts a session (or resumes one started here) and resolves with its session id once
   // Claude Code has started it. model: a value from listModels(); null or 'default' = your default.
-  start({ cwd, prompt, resume = null, model = null }) {
+  start({ cwd, prompt, images = [], resume = null, model = null }) {
     const inbox = new Inbox();
-    inbox.push(prompt);
+    inbox.push(promptContent(prompt, images));
+    let mainModel = null;
     let sessionId = resume;
     const q = query({
       prompt: inbox,
@@ -122,11 +143,13 @@ export class DashboardSessions {
               clearTimeout(timer);
               sessionId = m.session_id;
               this.lastAuth = m.apiKeySource ?? null;
+              mainModel = m.model ?? null;
               this.#live.set(sessionId, { q, inbox });
-              this.owned.set(sessionId, { cwd, model });
-              this.event({ session_id: sessionId, cwd, hook_event_name: 'UserPromptSubmit', prompt });
+              this.owned.set(sessionId, { ...this.owned.get(sessionId), cwd, model });
+              this.event({ session_id: sessionId, cwd, hook_event_name: 'UserPromptSubmit', prompt: promptText(prompt, images) });
               resolve(sessionId);
             } else if (m.type === 'result' && sessionId) {
+              this.#usage(sessionId, m, mainModel);
               this.event({ session_id: sessionId, cwd, hook_event_name: 'Stop' });
             }
           }
@@ -143,18 +166,33 @@ export class DashboardSessions {
     });
   }
 
-  // Sends a prompt. A session started here but no longer running (server restarted, or ended)
-  // is resumed with it. Returns false for sessions not started here.
-  async send(id, text) {
+  // The context window of the session's model, and its running cost. modelUsage also lists
+  // helper models (e.g. a small model for titles); the session's own model is the one to use.
+  // A result from a crash can carry zeros, which aren't a real total.
+  #usage(id, m, mainModel) {
+    const usage = m.modelUsage ?? {};
+    const main = usage[mainModel] ?? Object.values(usage).sort((a, b) => b.contextWindow - a.contextWindow)[0];
+    const entry = this.owned.get(id);
+    if (!entry) return;
+    if (main?.contextWindow) entry.contextWindow = main.contextWindow;
+    if (m.total_cost_usd > 0) {
+      entry.costUsd = m.total_cost_usd;
+      this.cost(id, m.total_cost_usd);
+    }
+  }
+
+  // Sends a prompt, with any images. A session started here but no longer running (server
+  // restarted, or ended) is resumed with it. Returns false for sessions not started here.
+  async send(id, text, images = []) {
     const live = this.#live.get(id);
     if (live) {
-      live.inbox.push(text);
-      this.event({ session_id: id, hook_event_name: 'UserPromptSubmit', prompt: text });
+      live.inbox.push(promptContent(text, images));
+      this.event({ session_id: id, hook_event_name: 'UserPromptSubmit', prompt: promptText(text, images) });
       return true;
     }
     const owned = this.owned.get(id);
     if (!owned) return false;
-    await this.start({ cwd: owned.cwd, model: owned.model, prompt: text, resume: id });
+    await this.start({ cwd: owned.cwd, model: owned.model, prompt: text, images, resume: id });
     return true;
   }
 

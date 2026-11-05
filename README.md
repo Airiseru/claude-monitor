@@ -1,6 +1,6 @@
 # Claude Monitor
 
-A local dashboard for your Claude Code sessions: which ones need you, what each is doing, Claude's latest reply, context used and cost, and the files and commands it touched. You can answer permission prompts from the page, and start sessions there (picking the folder and model) that you reply to from the browser. Search and filter the list, rename sessions, and see what each subagent did. See `PLAN.md` for what's next and the constraints behind the design.
+A local dashboard for your Claude Code sessions: which ones need you, what each is doing, Claude's latest reply, context used and cost, and the files and commands it touched. You can answer permission prompts from the page, and start sessions there (picking the folder and model) that you reply to from the browser. Search and filter the list, rename sessions, and see what each subagent did. Sessions started from the page can be sent images (paste them into the message box). **Insights** in the header opens a popup listing sessions that look stuck or are near a full context window, and what you've spent per day at API prices. See `PLAN.md` for what's next and the constraints behind the design.
 
 Needs Node 22+. One dependency, the Claude Agent SDK, for sessions started from the page:
 

@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { classifyPrompt, parseTranscript, TranscriptFile } from '../transcript.mjs';
 
+const jsonl = (entries) => entries.map((l) => JSON.stringify(l)).join('\n') + '\n';
+
 const lines = [
   { type: 'ai-title', aiTitle: 'Auto title' },
   { type: 'user', timestamp: '2026-11-04T01:00:00Z', cwd: '/w', gitBranch: 'main', message: { role: 'user', content: 'Fix the login bug' } },
@@ -116,11 +118,20 @@ test('keeps the conversation as chat messages, splitting Claude’s text at tool
   ]);
 });
 
+test('prompts that carried images are marked, including images sent with no text', () => {
+  const png = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } };
+  const t = parseTranscript(jsonl([
+    { type: 'user', timestamp: '2026-11-04T03:00:00Z', message: { role: 'user', content: [png, png, { type: 'text', text: 'What is wrong here?' }] } },
+    { type: 'user', timestamp: '2026-11-04T03:01:00Z', message: { role: 'user', content: [png] } },
+  ]));
+  assert.deepEqual(t.messages.map((m) => [m.text, m.images]), [['What is wrong here?', 2], ['', 1]]);
+  assert.equal(t.lastPrompt, '[1 image]');
+});
+
 // --- following a transcript file -----------------------------------------------------------
 
 const dir = mkdtempSync(join(tmpdir(), 'claude-monitor-transcript-'));
 after(() => rmSync(dir, { recursive: true, force: true }));
-const jsonl = (entries) => entries.map((l) => JSON.stringify(l)).join('\n') + '\n';
 const prompt = (text, ts = '2026-11-04T02:00:00Z') => ({ type: 'user', timestamp: ts, message: { role: 'user', content: text } });
 const said = (text) => ({ type: 'assistant', timestamp: '2026-11-04T02:00:01Z', message: { stop_reason: 'end_turn', content: [{ type: 'text', text }] } });
 

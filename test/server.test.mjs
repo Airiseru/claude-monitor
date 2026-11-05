@@ -201,6 +201,11 @@ test('page actions validate their input', async () => {
   assert.equal((await act(`/api/sessions/${SESSION}/send`, { text: 'hi' })).status, 404, 'only sessions started here take prompts');
   assert.equal((await act('/api/open-file', { id: SESSION, path: '/etc/hosts' })).status, 404, 'only files the session changed');
   assert.equal((await act('/api/hide', { ids: ['../x'] })).status, 400);
+  // Images are checked before anything starts.
+  const png = { mediaType: 'image/png', data: 'iVBORw0KGgo=' };
+  assert.equal((await act('/api/new-session', { cwd: work, prompt: 'hi', images: [{ mediaType: 'image/svg+xml', data: 'AAAA' }] })).status, 400);
+  assert.equal((await act('/api/new-session', { cwd: work, prompt: 'hi', images: [{ mediaType: 'image/png', data: 'not base64!' }] })).status, 400);
+  assert.equal((await act('/api/new-session', { cwd: work, prompt: 'hi', images: Array(6).fill(png) })).status, 400, 'at most 5 images');
 });
 
 test('usage limits come from the freshest status line snapshot', async () => {
@@ -211,6 +216,26 @@ test('usage limits come from the freshest status line snapshot', async () => {
   const limits = await waitFor(async () => (await request('GET', '/api/limits')).json(), 'limits', 5000);
   assert.deepEqual(limits.fiveHour, { pct: 14, resetsAt: 1793790000000 });
   assert.equal(limits.sevenDay.pct, 4);
+});
+
+test('spend adds up how much each session’s running total grew, and survives a restart', async () => {
+  const status = join(monitorHome, 'status');
+  const other = '99999999-2222-3333-4444-555555555555';
+  const write = (id, usd) => writeFileSync(join(status, `${id}.json`), JSON.stringify({ session_id: id, cost: { total_cost_usd: usd } }));
+  const today = async () => (await request('GET', '/api/spend')).json().today;
+  write(SESSION, 1.5);
+  await waitFor(async () => Math.abs(await today() - 1.5) < 1e-9, 'first total');
+  write(SESSION, 2); // the same session, 50 cents later
+  write(other, 0.25);
+  await waitFor(async () => Math.abs(await today() - 2.25) < 1e-9, 'growth only');
+  await sleep(1300); // saved about a second after a change
+  await stopServer();
+  await startServer();
+  await sleep(300); // the first scan of snapshots it has already counted
+  const s = (await request('GET', '/api/spend')).json();
+  assert.ok(Math.abs(s.today - 2.25) < 1e-9, `not counted twice after a restart (got ${s.today})`);
+  assert.ok(Math.abs(s.week - 2.25) < 1e-9);
+  assert.equal(s.days.length, 30);
 });
 
 test('a removed session stays removed across a restart and comes back on new activity', async () => {

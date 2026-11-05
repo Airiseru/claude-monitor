@@ -45,7 +45,44 @@ const dashboard = new DashboardSessions({
   decide: decideInPage,
   event: (ev) => { const s = applyHook(sessions, ev, Date.now()); if (s) { pending.settle(ev); refreshSoon(s.id); } broadcast(); },
   changed: () => broadcast(),
+  cost: (id, usd) => recordCost(id, usd, Date.now()),
 });
+
+// --- spend ---------------------------------------------------------------------------------
+
+// What your sessions cost per day, at API prices (an estimate of usage, not a bill on a
+// subscription). Status lines and the SDK report each session's running total, so a day's
+// spend is the sum of how much those totals grew that day (server's local time). A total that
+// went down was restarted, and counts from zero.
+const SPEND_DAYS = 30;
+const spend = { days: {}, seen: {} }; // days: 'YYYY-MM-DD' -> usd; seen: session id -> { usd, at }
+
+const dayOf = (ms) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+function recordCost(id, usd, at) {
+  if (typeof usd !== 'number' || !(usd > 0)) return;
+  const before = spend.seen[id]?.usd ?? 0;
+  const grew = usd >= before ? usd - before : usd;
+  spend.seen[id] = { usd, at };
+  if (grew > 0) spend.days[dayOf(at)] = (spend.days[dayOf(at)] ?? 0) + grew;
+}
+
+// Totals for the last SPEND_DAYS days, newest first, plus today and the last 7 days.
+function spendSummary(now = Date.now()) {
+  const days = [];
+  for (let i = 0; i < SPEND_DAYS; i++) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    const day = dayOf(d.getTime());
+    days.push({ day, usd: spend.days[day] ?? 0 });
+  }
+  const sum = (n) => days.slice(0, n).reduce((a, d) => a + d.usd, 0);
+  const since = Object.keys(spend.days).sort()[0] ?? null; // the first day there's anything for
+  return { today: sum(1), week: sum(7), month: sum(SPEND_DAYS), days, since };
+}
 
 // A dashboard session's permission prompt or question: shown in the page with no time limit
 // (there's no terminal to fall back to), answered by a click.
@@ -85,7 +122,15 @@ async function loadState() {
   for (const id of saved.hidden ?? []) if (SESSION_ID.test(id)) hidden.add(id);
   for (const [id, o] of saved.owned ?? []) {
     const entry = typeof o === 'string' ? { cwd: o, model: null } : o; // older saves held just the folder
-    if (SESSION_ID.test(id) && typeof entry?.cwd === 'string') dashboard.owned.set(id, { cwd: entry.cwd, model: entry.model ?? null });
+    if (!SESSION_ID.test(id) || typeof entry?.cwd !== 'string') continue;
+    const num = (n) => (typeof n === 'number' && n > 0 ? n : null);
+    dashboard.owned.set(id, { cwd: entry.cwd, model: entry.model ?? null, contextWindow: num(entry.contextWindow), costUsd: num(entry.costUsd) });
+  }
+  for (const [day, usd] of Object.entries(saved.spend?.days ?? {})) {
+    if (/^\d{4}-\d\d-\d\d$/.test(day) && typeof usd === 'number') spend.days[day] = usd;
+  }
+  for (const [id, v] of Object.entries(saved.spend?.seen ?? {})) {
+    if (SESSION_ID.test(id) && typeof v?.usd === 'number' && typeof v?.at === 'number') spend.seen[id] = { usd: v.usd, at: v.at };
   }
 }
 
@@ -98,6 +143,7 @@ function saveSoon() {
       sessions: [...sessions.values()].map((s) => Object.fromEntries(SAVED_FIELDS.map((k) => [k, s[k] ?? null]))),
       hidden: [...hidden].filter((id) => sessions.has(id)), // others have aged out of the list anyway
       owned: [...dashboard.owned].filter(([id]) => sessions.has(id)),
+      spend,
     };
     const tmp = `${STATE_FILE}.tmp`;
     try {
@@ -228,6 +274,7 @@ async function loadStatus(file, mtimeMs = Date.now()) {
       linesAdded: c.total_lines_added ?? null,
       linesRemoved: c.total_lines_removed ?? null,
     });
+    recordCost(id, c.total_cost_usd, mtimeMs);
     readLimits(s.rate_limits, mtimeMs);
     broadcast();
   } catch {
@@ -239,7 +286,14 @@ async function loadStatus(file, mtimeMs = Date.now()) {
 
 function summary(s) {
   const t = transcripts.get(s.transcriptPath)?.latest;
-  const context = contexts.get(s.id) ?? (t?.contextTokens ? { pct: null, size: null, tokens: t.contextTokens, model: null } : null);
+  // Sessions started here have no status line: their context is the transcript's latest token
+  // count against the model's window (from the SDK), and their cost comes from the SDK too.
+  const owned = dashboard.owned.get(s.id);
+  const size = owned?.contextWindow ?? null;
+  const context = contexts.get(s.id) ?? (t?.contextTokens
+    ? { pct: size ? Math.min(100, (t.contextTokens / size) * 100) : null, size, tokens: t.contextTokens, model: null }
+    : null);
+  const cost = costs.get(s.id) ?? (owned?.costUsd ? { usd: owned.costUsd, linesAdded: null, linesRemoved: null } : null);
   return {
     id: s.id,
     status: s.status,
@@ -255,7 +309,7 @@ function summary(s) {
     lastEventAt: s.lastEventAt,
     transcriptUpdatedAt: t?.updatedAt ?? null,
     context,
-    cost: costs.get(s.id) ?? null,
+    cost,
     // Started here, so it takes prompts from the page; `live` is whether it's running right now.
     dashboard: dashboard.owned.has(s.id) ? { live: dashboard.isLive(s.id) } : null,
   };
@@ -286,6 +340,11 @@ async function pruneOld(now = Date.now()) {
   const kept = (path) => keep.some((p) => path === p || path.startsWith(`${p.replace(/\.jsonl$/, '')}/`));
   for (const path of transcripts.keys()) if (!kept(path)) transcripts.delete(path);
   for (const path of finishedAgents.keys()) if (!kept(path)) finishedAgents.delete(path);
+  // Spend: keep SPEND_DAYS days. A session's last total is kept as long, so a session resumed
+  // within that time adds only what it spends from then on.
+  const oldest = dayOf(now - SPEND_DAYS * 24 * 3600_000);
+  for (const day of Object.keys(spend.days)) if (day < oldest) delete spend.days[day];
+  for (const [id, v] of Object.entries(spend.seen)) if (v.at < now - SPEND_DAYS * 24 * 3600_000) delete spend.seen[id];
   // A session's status line rewrites its snapshot on its next turn, so old ones can go.
   for (const file of await readdir(STATUS_DIR).catch(() => [])) {
     const st = await stat(join(STATUS_DIR, file)).catch(() => null);
@@ -320,6 +379,26 @@ async function findEditor() {
     }
   }
   return null;
+}
+
+// --- images in prompts ---------------------------------------------------------------------
+
+// Images sent with a prompt, as the API takes them: PNG, JPEG, GIF or WebP, at most 5 MB
+// each. The page shrinks bigger ones before sending.
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const MAX_IMAGES = 5;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_PROMPT_BODY = MAX_IMAGES * Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 300_000;
+
+function readImages(images) {
+  if (images === undefined) return [];
+  if (!Array.isArray(images) || images.length > MAX_IMAGES) throw new HttpError(400, `Up to ${MAX_IMAGES} images per message`);
+  return images.map((i) => {
+    if (!IMAGE_TYPES.has(i?.mediaType)) throw new HttpError(400, 'Images must be PNG, JPEG, GIF or WebP');
+    if (typeof i.data !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(i.data)) throw new HttpError(400, 'Image data must be base64');
+    if (Buffer.byteLength(i.data, 'base64') > MAX_IMAGE_BYTES) throw new HttpError(400, 'Each image must be 5 MB or less');
+    return { mediaType: i.mediaType, data: i.data };
+  });
 }
 
 // --- HTTP ----------------------------------------------------------------------------------
@@ -465,7 +544,8 @@ async function handle(req, res) {
   }
 
   if (req.method === 'POST' && pathname === '/api/new-session') {
-    const { cwd, prompt, model = null } = await readJson(req, 200_000);
+    const { cwd, prompt, model = null, images: rawImages } = await readJson(req, MAX_PROMPT_BODY);
+    const images = readImages(rawImages);
     if (model != null && !((await claudeInfo().catch(() => null))?.models ?? []).some((m) => m.value === model)) {
       throw new HttpError(400, 'Unknown model');
     }
@@ -473,9 +553,9 @@ async function handle(req, res) {
     if (!isAbsolute(dir) || !(await stat(dir).then((st) => st.isDirectory(), () => false))) {
       throw new HttpError(400, 'That folder doesn’t exist');
     }
-    if (typeof prompt !== 'string' || !prompt.trim()) throw new HttpError(400, 'Type a first prompt');
+    if (typeof prompt !== 'string' || (!prompt.trim() && !images.length)) throw new HttpError(400, 'Type a first prompt');
     let id;
-    try { id = await dashboard.start({ cwd: dir, prompt, model }); } catch (err) { throw new HttpError(502, err.message); }
+    try { id = await dashboard.start({ cwd: dir, prompt: prompt.trim(), images, model }); } catch (err) { throw new HttpError(502, err.message); }
     // Hooks report the transcript path too; this covers the moments before they do (or no hooks).
     const s = sessions.get(id);
     if (s) s.transcriptPath ??= join(PROJECTS_DIR, dir.replace(/[^a-zA-Z0-9]/g, '-'), `${id}.jsonl`);
@@ -502,9 +582,10 @@ async function handle(req, res) {
     const [, id, action] = act;
     if (!dashboard.owned.has(id)) throw new HttpError(404, 'Only sessions started here take prompts from the page');
     if (action === 'send') {
-      const { text } = await readJson(req, 200_000);
-      if (typeof text !== 'string' || !text.trim()) throw new HttpError(400, 'Type a message');
-      try { await dashboard.send(id, text); } catch (err) { throw new HttpError(502, err.message); }
+      const { text = '', images: rawImages } = await readJson(req, MAX_PROMPT_BODY);
+      const images = readImages(rawImages);
+      if (typeof text !== 'string' || (!text.trim() && !images.length)) throw new HttpError(400, 'Type a message');
+      try { await dashboard.send(id, text.trim(), images); } catch (err) { throw new HttpError(502, err.message); }
     } else if (action === 'interrupt') {
       await dashboard.interrupt(id);
     } else {
@@ -572,6 +653,7 @@ async function handle(req, res) {
 
   if (pathname === '/api/sessions') return sendJson(res, list());
   if (pathname === '/api/limits') return sendJson(res, limits);
+  if (pathname === '/api/spend') return sendJson(res, spendSummary());
 
   const m = pathname.match(/^\/api\/sessions\/([\w-]+)$/);
   if (m) {
@@ -589,7 +671,7 @@ async function handle(req, res) {
   res.writeHead(200, {
     'Content-Type': asset[1],
     'Cache-Control': 'no-store',
-    'Content-Security-Policy': "default-src 'self'",
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' blob:", // blob: previews images you attach
   });
   res.end(await readFile(join(import.meta.dirname, 'public', asset[0])));
 }
@@ -604,9 +686,9 @@ const server = http.createServer((req, res) => {
 });
 
 await mkdir(STATUS_DIR, { recursive: true });
+await loadState(); // before the first scan, so spend already counted isn't counted again
 await scanStatusDir();
 setInterval(scanStatusDir, 2000);
-await loadState();
 await loadRecentSessions();
 await pruneOld(); // drops transcripts read while looking for recent sessions
 setInterval(() => pruneOld().catch((err) => console.error('Could not prune:', err.message)), 10 * 60_000);

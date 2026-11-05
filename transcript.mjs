@@ -130,13 +130,15 @@ export class TranscriptReader {
       t.timeline.push({ ts: e.timestamp, kind: 'note', text: 'Context compacted: earlier conversation summarized' });
     } else if (e.type === 'user' && !e.isMeta) {
       const blocks = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : Array.isArray(m.content) ? m.content : [];
+      const images = blocks.filter((b) => b?.type === 'image').length; // pasted or attached with the prompt
+      let asked = null; // the prompt this entry adds to the chat, if any
       for (const b of blocks) {
         if (b?.type === 'text') {
           const p = classifyPrompt(b.text);
           if (p) {
             t.timeline.push({ ts: e.timestamp, ...p });
             if (p.kind === 'prompt') {
-              t.messages.push({ role: 'user', ts: e.timestamp, text: p.text });
+              t.messages.push(asked = { role: 'user', ts: e.timestamp, text: p.text });
               this.#said = null;
               t.lastPrompt = p.text;
               t.lastResponse = t.lastResponseAt = null;
@@ -148,6 +150,17 @@ export class TranscriptReader {
           const item = this.#toolItems.get(b.tool_use_id);
           if (item) item.error = true;
         }
+      }
+      if (images && asked) asked.images = images;
+      else if (images) { // images with no text
+        const text = `[${images} image${images > 1 ? 's' : ''}]`;
+        t.timeline.push({ ts: e.timestamp, kind: 'prompt', text });
+        t.messages.push({ role: 'user', ts: e.timestamp, text: '', images });
+        this.#said = null;
+        t.lastPrompt = text;
+        t.lastResponse = t.lastResponseAt = null;
+        t.turnEnded = false;
+        this.#reply = [];
       }
     }
 

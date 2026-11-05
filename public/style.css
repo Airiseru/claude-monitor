@@ -58,11 +58,14 @@ body {
 button { font: inherit; color: inherit; }
 
 .top {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px;
   padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
 }
 .brand { font-weight: 650; }
 .top-left, .top-right { display: flex; align-items: center; gap: 12px; }
+.top-right { flex-wrap: wrap; justify-content: flex-end; }
+/* Header text never breaks mid-label; on narrow screens whole items wrap instead */
+.brand, .top .btn, .limit-label, .limit-reset, .conn { white-space: nowrap; }
 .top .btn { padding: 3px 10px; font-weight: 550; }
 #toggle-sidebar.alert { color: var(--needs); border-color: var(--needs); }
 .sidebar-hidden .sidebar, .sidebar-hidden .resize { display: none; }
@@ -103,6 +106,16 @@ kbd {
 .limit .ctx-track { width: 60px; }
 .limit-label { color: var(--text); font-weight: 550; }
 @media (max-width: 900px) { .limit-reset { display: none; } }
+@media (max-width: 760px) {
+  .top { padding: 8px 12px; }
+  .top-right { width: 100%; justify-content: space-between; gap: 8px 10px; }
+  .limit .ctx-track { width: 44px; }
+}
+@media (max-width: 480px) {
+  .limits { width: 100%; gap: 12px; }
+  .limit { flex: 1; }
+  .limit .ctx-track { flex: 1; width: auto; }
+}
 
 .filter-note { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--muted); margin: 8px 6px 0; }
 .detail { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -252,7 +265,9 @@ textarea.input, .composer textarea { resize: vertical; }
 
 /* The detail view (.detail) is a scrolling area plus the reply box as a footer under it, so
    nothing can scroll beneath or past the reply box. */
-#detail-content { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 28px 48px; }
+/* No top padding: the tabs pin to the very top while scrolling, with nothing showing above them. */
+#detail-content { flex: 1; min-height: 0; overflow-y: auto; padding: 0 28px 48px; position: relative; }
+#detail-content > :first-child { margin-top: 20px; }
 .composer { flex: none; padding: 10px 28px 14px; background: var(--bg); border-top: 1px solid var(--border); }
 .composer[hidden] { display: none; }
 .composer .hint { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
@@ -374,7 +389,10 @@ textarea.input, .composer textarea { resize: vertical; }
 /* Session id, and the Timeline / Chat history tabs */
 .session-id { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12.5px; margin: -4px 0 10px; }
 .session-id code { font: 12px var(--mono); user-select: all; word-break: break-all; }
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.tabs {
+  display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 0 -28px 16px; padding: 6px 28px 0;
+  position: sticky; top: 0; z-index: 2; background: var(--bg);
+}
 .tab {
   background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
   padding: 6px 12px; cursor: pointer; font-weight: 600; color: var(--muted);
@@ -398,6 +416,67 @@ textarea.input, .composer textarea { resize: vertical; }
   .sidebar-tools { padding: 10px 16px 4px; }
   .sessions { overflow: visible; padding: 0 16px 16px; }
   .detail { overflow: visible; }
-  #detail-content { overflow: visible; padding: 16px; }
+  #detail-content { overflow: visible; padding: 0 16px 16px; }
+  #detail-content > :first-child { margin-top: 16px; }
+  .tabs { margin: 0 -16px 16px; padding: 6px 16px 0; }
   .composer { position: sticky; bottom: 0; padding: 10px 16px 14px; }
 }
+
+/* Insights: a modal centred in the window; the page behind is dimmed and blurred */
+.insights-anchor { position: relative; }
+.insights {
+  width: min(760px, calc(100vw - 32px)); max-height: min(70vh, 640px); padding: 0;
+  background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+}
+.insights::backdrop { background: rgba(0, 0, 0, .35); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+.insights-inner { padding: 14px 16px 16px; }
+.insights-head { display: flex; align-items: center; justify-content: space-between; margin: 0 0 12px; }
+.insights .insights-head h2 { font-size: 15px; margin: 0; }
+.insights-close {
+  font-size: 20px; line-height: 1; width: 28px; height: 28px; border-radius: 6px; cursor: pointer;
+  border: 1px solid transparent; background: none; color: var(--muted);
+}
+.insights-close:hover { background: var(--bg); border-color: var(--border); color: var(--text); }
+.insights-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* "Are you sure?" before removing sessions from the list */
+.confirm {
+  width: min(400px, calc(100vw - 32px)); padding: 18px 20px 16px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+}
+.confirm::backdrop { background: rgba(0, 0, 0, .35); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+.confirm h2 { font-size: 15px; margin: 0 0 6px; }
+.confirm p { font-size: 13px; color: var(--muted); margin: 0 0 16px; }
+.confirm .actions { display: flex; justify-content: flex-end; gap: 8px; }
+.btn.danger { background: var(--ctx-high); border-color: var(--ctx-high); color: #fff; }
+.insights-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 28px; }
+.insights h2 { font-size: 13px; margin: 0 0 2px; }
+/* The description under each heading is quieter than the finding itself */
+.insights .hint { font-size: 11.5px; line-height: 1.4; color: var(--muted); opacity: .7; margin: 0 0 8px; }
+.insights .muted { margin: 0; font-size: 13px; color: var(--text); }
+.insight-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.insight-list li { display: flex; flex-direction: column; font-size: 12.5px; }
+.insight-session { font-size: 13px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spend-totals { display: flex; gap: 20px; margin: 0 0 8px; }
+.spend-totals dt { font-size: 12px; color: var(--muted); }
+.spend-totals dd { margin: 0; font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.spend-days { border-collapse: collapse; font-size: 12.5px; margin-bottom: 6px; }
+.spend-days th { text-align: left; font-weight: 400; color: var(--muted); padding: 1px 16px 1px 0; }
+.spend-days td { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Images attached to a prompt */
+.attachments { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 8px; }
+.attachments[hidden] { display: none; }
+.attachment { position: relative; margin: 0; width: 64px; height: 64px; }
+.attachment img { width: 100%; height: 100%; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+.attachment-remove {
+  position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 13px; line-height: 1; cursor: pointer;
+}
+.attachment-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.dropping { outline: 2px dashed var(--accent); outline-offset: -4px; }
+.new-form .hint:empty { display: none; }
+.new-form > .hint { font-size: 12px; color: var(--muted); }
+.msg-images { margin: 0 0 3px; font-size: 12px; color: var(--muted); }
