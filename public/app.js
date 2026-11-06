@@ -831,7 +831,12 @@ function notifyChanges(list) {
       if (s.status === 'needs_you' && s.alerts.needs > was.needs) {
         notify(s, 'Needs you', s.permissions[0]?.summary ?? s.need?.message);
       } else if (s.status !== 'working' && s.alerts.done > was.done) { // already back at work: not done
-        notify(s, 'Finished', s.lastResponse ? toPlainText(s.lastResponse) : s.lastPrompt);
+        const reply = s.lastResponse ? toPlainText(s.lastResponse) : s.lastPrompt;
+        const n = s.runningSubagents;
+        // Its turn ended but background subagents are still at work: it carries on when they
+        // report back, and "Finished" comes then. Said quietly, without a sound.
+        if (n > 0) notify(s, `Waiting on ${n} subagent${n > 1 ? 's' : ''}`, reply, true);
+        else notify(s, 'Finished', reply);
       }
     }
   }
@@ -839,8 +844,8 @@ function notifyChanges(list) {
 }
 
 // One notification per session: a newer one replaces the older, and still alerts (renotify).
-function notify(s, what, body) {
-  const n = new Notification(`${what}: ${titleOf(s)}`, { body: (body ?? '').slice(0, 180), tag: s.id, renotify: true });
+function notify(s, what, body, silent = false) {
+  const n = new Notification(`${what}: ${titleOf(s)}`, { body: (body ?? '').slice(0, 180), tag: s.id, renotify: true, silent });
   n.onclick = () => { window.focus(); select(s.id); n.close(); };
 }
 

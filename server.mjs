@@ -215,12 +215,35 @@ async function readSubagents(transcriptPath) {
 
 // Hooks fire before the transcript is written, so re-read it shortly after the last event.
 const refreshTimers = new Map();
+// How many of a session's subagents are still running, from their meta files. One that isn't
+// marked finished but hasn't written to its transcript for a while is taken as gone (its session
+// was killed, say), so it can't hold the count up forever.
+const runningAgents = new Map(); // session id -> number of its subagents still running
+const finishedMeta = new Set();  // subagent meta files already marked finished; they won't change
+const STALE_AGENT_MS = 10 * 60_000;
+async function countRunningAgents(s) {
+  if (!s?.transcriptPath) return;
+  const dir = join(s.transcriptPath.replace(/\.jsonl$/, ''), 'subagents');
+  let n = 0;
+  for (const file of await readdir(dir).catch(() => [])) {
+    const agentId = file.match(/^agent-([\w-]+)\.meta\.json$/)?.[1];
+    const path = join(dir, file);
+    if (!agentId || finishedMeta.has(path)) continue;
+    const meta = await readFile(path, 'utf8').then(JSON.parse).catch(() => null);
+    if (meta?.finished) { finishedMeta.add(path); continue; }
+    const st = await stat(join(dir, `agent-${agentId}.jsonl`)).catch(() => null);
+    if (meta && st && Date.now() - st.mtimeMs < STALE_AGENT_MS) n++;
+  }
+  runningAgents.set(s.id, n);
+}
+
 function refreshSoon(id) {
   clearTimeout(refreshTimers.get(id));
   refreshTimers.set(id, setTimeout(async () => {
     refreshTimers.delete(id);
     const path = sessions.get(id)?.transcriptPath;
     if (path) await readTranscript(path).catch(() => {});
+    await countRunningAgents(sessions.get(id)).catch(() => {});
     broadcast();
   }, 1000));
 }
@@ -323,6 +346,7 @@ function summary(s) {
     cost,
     artifacts: t?.artifacts?.size ?? 0, // how many it published; the detail lists them
     alerts: { needs: s.needCount ?? 0, done: s.doneCount ?? 0 }, // counts that go up; see sessions.mjs
+    runningSubagents: runningAgents.get(s.id) ?? 0,
     // Runs (or ran) in the monitor's tmux, so it takes messages from the page. live: running
     // right now; attach: the command that opens it in a terminal; here: started from the page.
     terminal: owned ? { live: terminals.isLive(s.id), attach: terminals.attachCommand(s.id), here: Boolean(owned.here) } : null,
@@ -355,6 +379,8 @@ async function pruneOld(now = Date.now()) {
   const kept = (path) => keep.some((p) => path === p || path.startsWith(`${p.replace(/\.jsonl$/, '')}/`));
   for (const path of transcripts.keys()) if (!kept(path)) transcripts.delete(path);
   for (const path of finishedAgents.keys()) if (!kept(path)) finishedAgents.delete(path);
+  for (const path of finishedMeta) if (!kept(path)) finishedMeta.delete(path);
+  for (const id of runningAgents.keys()) if (!sessions.has(id)) runningAgents.delete(id);
   // Spend: keep SPEND_DAYS days. A session's last total is kept as long, so a session resumed
   // within that time adds only what it spends from then on.
   const oldest = dayOf(now - SPEND_DAYS * 24 * 3600_000);
@@ -517,6 +543,9 @@ async function handle(req, res) {
     if (req.headers.origin) throw new HttpError(403, 'Forbidden'); // browsers send Origin; hooks don't
     const ev = await readJson(req, MAX_HOOK_BODY);
     const s = applyHook(sessions, ev, Date.now());
+    // A finished turn goes out with an up-to-date count of subagents still running, so the page
+    // can tell "done" from "waiting on its background subagents".
+    if (s && ev.hook_event_name === 'Stop') await countRunningAgents(s).catch(() => {});
     if (s) { hidden.delete(s.id); refreshSoon(s.id); broadcast(); } // a removed session that's active again comes back
     if (pathname === '/permission' && s && ev.hook_event_name === 'PermissionRequest') return holdPermission(ev, res);
     if (s && pending.settle(ev)) broadcast();
