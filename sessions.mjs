@@ -55,6 +55,7 @@ export function applyHook(sessions, ev, now) {
       break;
     case 'Stop':
       set(s, 'waiting');
+      s.doneCount = (s.doneCount ?? 0) + 1;
       break;
     case 'SessionEnd':
       set(s, 'ended');
@@ -64,7 +65,11 @@ export function applyHook(sessions, ev, now) {
   return s;
 }
 
+// needCount and doneCount go up each time the session starts needing you and each time it
+// finishes a turn, so the page can notify for every one, even when updates arrive batched and
+// it never sees the status in between (needs you -> working -> needs you again).
 function set(s, status, need = null, activity = null) {
+  if (status === 'needs_you' && s.status !== 'needs_you') s.needCount = (s.needCount ?? 0) + 1;
   s.status = status;
   s.need = need;
   s.activity = activity;

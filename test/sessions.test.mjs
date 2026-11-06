@@ -57,3 +57,19 @@ test('a prompt with images sent from the page shows the image count, not the pat
   const s = applyHook(sessions, { session_id: 'a', hook_event_name: 'UserPromptSubmit', prompt: 'Which colour?\n/Users/me/.claude-monitor/uploads/a/1793850909792-1.png' }, 1);
   assert.equal(s.lastPrompt, '[1 image] Which colour?');
 });
+
+test('counts each time a session starts needing you and each finished turn', () => {
+  const m = new Map();
+  applyHook(m, ev('UserPromptSubmit', { prompt: 'go' }), 1);
+  applyHook(m, ev('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'ls' } }), 2);
+  applyHook(m, ev('Notification', { notification_type: 'permission_prompt', message: 'Claude needs your permission' }), 3);
+  assert.equal(m.get('s1').needCount, 1, 'one request, however many events announce it');
+  applyHook(m, ev('PostToolUse', { tool_name: 'Bash' }), 4);
+  applyHook(m, ev('PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'pwd' } }), 5);
+  assert.equal(m.get('s1').needCount, 2);
+  applyHook(m, ev('PostToolUse', { tool_name: 'Bash' }), 6);
+  applyHook(m, ev('Stop'), 7);
+  applyHook(m, ev('PreToolUse', { tool_name: 'Read', tool_input: { file_path: '/w/a' } }), 8); // a subagent reported back
+  applyHook(m, ev('Stop'), 9);
+  assert.equal(m.get('s1').doneCount, 2);
+});

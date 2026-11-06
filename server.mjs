@@ -322,6 +322,7 @@ function summary(s) {
     context,
     cost,
     artifacts: t?.artifacts?.size ?? 0, // how many it published; the detail lists them
+    alerts: { needs: s.needCount ?? 0, done: s.doneCount ?? 0 }, // counts that go up; see sessions.mjs
     // Runs (or ran) in the monitor's tmux, so it takes messages from the page. live: running
     // right now; attach: the command that opens it in a terminal; here: started from the page.
     terminal: owned ? { live: terminals.isLive(s.id), attach: terminals.attachCommand(s.id), here: Boolean(owned.here) } : null,

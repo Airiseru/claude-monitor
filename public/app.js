@@ -820,25 +820,27 @@ document.getElementById('notify').addEventListener('click', async () => {
   renderToolbar();
 });
 
-// Notifies when a session starts needing you or finishes a turn, only while you're not
-// looking at the dashboard.
-let lastStatus = null; // session id -> status at the previous update; null before the first
+// Notifies every time a session starts needing you or finishes a turn (e.g. again after its
+// subagents report back), only while you're not looking at the dashboard. Goes by the server's
+// counts rather than comparing statuses, since a batched update can skip a status in between.
+let lastAlerts = null; // session id -> { needs, done } at the previous update; null before the first
 function notifyChanges(list) {
-  if (lastStatus && notifyOn && (document.hidden || !document.hasFocus())) {
+  if (lastAlerts && notifyOn && (document.hidden || !document.hasFocus())) {
     for (const s of list) {
-      const was = lastStatus.get(s.id);
-      if (s.status === 'needs_you' && was !== 'needs_you') {
+      const was = lastAlerts.get(s.id) ?? { needs: 0, done: 0 };
+      if (s.status === 'needs_you' && s.alerts.needs > was.needs) {
         notify(s, 'Needs you', s.permissions[0]?.summary ?? s.need?.message);
-      } else if (s.status === 'waiting' && was === 'working') {
+      } else if (s.status !== 'working' && s.alerts.done > was.done) { // already back at work: not done
         notify(s, 'Finished', s.lastResponse ? toPlainText(s.lastResponse) : s.lastPrompt);
       }
     }
   }
-  lastStatus = new Map(list.map((s) => [s.id, s.status]));
+  lastAlerts = new Map(list.map((s) => [s.id, s.alerts]));
 }
 
+// One notification per session: a newer one replaces the older, and still alerts (renotify).
 function notify(s, what, body) {
-  const n = new Notification(`${what}: ${titleOf(s)}`, { body: (body ?? '').slice(0, 180), tag: s.id });
+  const n = new Notification(`${what}: ${titleOf(s)}`, { body: (body ?? '').slice(0, 180), tag: s.id, renotify: true });
   n.onclick = () => { window.focus(); select(s.id); n.close(); };
 }
 
