@@ -194,7 +194,7 @@ test('a file that is rewritten shorter is read again from the start', async () =
   assert.deepEqual(t.timeline.map((i) => i.text), ['only']);
 });
 
-test('lists the artifacts a session published, docs included; a new version updates the same entry', () => {
+test('lists the artifacts a session published, docs included; a new version updates the entry, a delete removes it', () => {
   const use = (id, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Artifact', input }] } });
   const result = (id, ts, toolUseResult, is_error = false) => ({
     type: 'user', timestamp: ts, toolUseResult,
@@ -212,6 +212,12 @@ test('lists the artifacts a session published, docs included; a new version upda
     result('p2', '2026-11-04T01:03:00Z', published(2, 'users')),
     use('d1', { type_url: 'https://claude.ai/artifact/DocsType', title: 'Notes' }),
     result('d1', '2026-11-04T01:03:30Z', { created_from_type: true, url: 'https://claude.ai/artifact/doc9', title: 'Notes', version: 'v-1' }),
+    use('p4', { file_path: '/s/gone.html' }),
+    result('p4', '2026-11-04T01:03:40Z', { url: 'https://claude.ai/artifact/gone', artifact_id: 'g1', title: 'Gone', seq: 1 }),
+    use('x1', { action: 'delete', url: 'https://claude.ai/artifact/abc', path: '0123456789abcdef0123456789abcdef' }),
+    result('x1', '2026-11-04T01:03:45Z', { asset_delete: true }),
+    use('x2', { action: 'delete', url: 'https://claude.ai/artifact/gone' }),
+    result('x2', '2026-11-04T01:03:50Z', { artifact_delete: { url: 'https://claude.ai/artifact/gone', deleted: true } }),
     use('p3', { file_path: '/s/broken.html' }),
     result('p3', '2026-11-04T01:04:00Z', { url: 'https://claude.ai/artifact/zzz', artifact_id: 'a3', title: 'Broken' }, true),
   ]));

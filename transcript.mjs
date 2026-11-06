@@ -89,7 +89,7 @@ export class TranscriptReader {
   #reply = [];           // text blocks since the last prompt or tool call
   #said = null;          // Claude's chat message still being added to (no tool call since)
   #toolItems = new Map(); // tool_use id -> timeline item
-  #publishes = new Set(); // ids of Artifact tool calls that publish a page, awaiting their result
+  #artifactCalls = new Map(); // Artifact tool call id -> 'publish' | 'delete', awaiting its result
 
   constructor({ sidechain = false } = {}) { this.#sidechain = sidechain; }
 
@@ -157,7 +157,12 @@ export class TranscriptReader {
         } else if (b?.type === 'tool_result') {
           const item = this.#toolItems.get(b.tool_use_id);
           if (item && b.is_error) item.error = true;
-          if (this.#publishes.delete(b.tool_use_id) && !b.is_error) this.#published(e.toolUseResult, e.timestamp);
+          const call = this.#artifactCalls.get(b.tool_use_id);
+          this.#artifactCalls.delete(b.tool_use_id);
+          if (call === 'publish' && !b.is_error) this.#published(e.toolUseResult, e.timestamp);
+          if (call === 'delete' && !b.is_error && e.toolUseResult?.artifact_delete?.deleted) {
+            this.#t.artifacts.delete(artifactId(e.toolUseResult.artifact_delete.url));
+          }
         }
       }
       if (images && asked) asked.images = images;
@@ -197,7 +202,12 @@ export class TranscriptReader {
         t.timeline.push(item);
         this.#toolItems.set(b.id, item);
         // Publishing a page, not reading one or uploading a file into it.
-        if (b.name === 'Artifact' && (input.action ?? 'publish') === 'publish' && !input.asset) this.#publishes.add(b.id);
+        // Publishing or deleting a whole page, not reading one or adding/removing a file in it.
+        if (b.name === 'Artifact') {
+          const action = input.action ?? 'publish';
+          if (action === 'publish' && !input.asset) this.#artifactCalls.set(b.id, 'publish');
+          if (action === 'delete' && !input.path) this.#artifactCalls.set(b.id, 'delete');
+        }
 
         const path = input.file_path ?? input.notebook_path;
         if (EDIT_TOOLS.has(b.name) && path) {
@@ -215,7 +225,7 @@ export class TranscriptReader {
   // Keyed by the link's id: a page published from a file carries an artifact_id too, but one
   // created from a type (a doc) doesn't.
   #published(r, ts) {
-    const id = typeof r?.url === 'string' && r.url.match(/^https:\/\/claude\.ai\/(?:code\/)?artifact\/([\w-]+)/)?.[1];
+    const id = artifactId(r?.url);
     if (!id) return;
     const a = this.#t.artifacts.get(id) ?? { id, publishedAt: ts };
     this.#t.artifacts.set(id, {
@@ -223,6 +233,11 @@ export class TranscriptReader {
       audience: r.audience ?? a.audience ?? null, updatedAt: ts,
     });
   }
+}
+
+// The id in a claude.ai artifact link, or null for anything else.
+function artifactId(url) {
+  return (typeof url === 'string' && url.match(/^https:\/\/claude\.ai\/(?:code\/)?artifact\/([\w-]+)/)?.[1]) || null;
 }
 
 // Images sent from the monitor page reach Claude Code as file paths, one per line after the
