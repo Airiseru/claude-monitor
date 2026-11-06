@@ -321,6 +321,7 @@ function summary(s) {
     transcriptUpdatedAt: t?.updatedAt ?? null,
     context,
     cost,
+    artifacts: t?.artifacts?.size ?? 0, // how many it published; the detail lists them
     // Runs (or ran) in the monitor's tmux, so it takes messages from the page. live: running
     // right now; attach: the command that opens it in a terminal; here: started from the page.
     terminal: owned ? { live: terminals.isLive(s.id), attach: terminals.attachCommand(s.id), here: Boolean(owned.here) } : null,
@@ -732,7 +733,9 @@ async function handle(req, res) {
     const t = await readTranscript(s.transcriptPath);
     return sendJson(res, {
       ...summary(s), lastResponse: t.lastResponse, lastResponseAt: t.lastResponseAt, turnEnded: t.turnEnded,
-      timeline: t.timeline.slice(-500), messages: t.messages.slice(-300), files: [...t.files.values()], subagents: await readSubagents(s.transcriptPath),
+      timeline: t.timeline.slice(-500), messages: t.messages.slice(-300), files: [...t.files.values()],
+      artifacts: [...t.artifacts.values()].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))),
+      subagents: await readSubagents(s.transcriptPath),
     });
   }
 

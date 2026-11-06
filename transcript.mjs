@@ -78,6 +78,7 @@ export class TranscriptReader {
   #t = {
     title: null, lastPrompt: null, cwd: null, branch: null, model: null, contextTokens: null,
     startedAt: null, updatedAt: null, timeline: [], files: new Map(),
+    artifacts: new Map(), // the link's artifact id -> { id, url, title, version, audience ('owner': private), publishedAt, updatedAt }
     lastResponse: null,  // Claude's reply to the last prompt: its text after the last tool call
     lastResponseAt: null,
     turnEnded: false,    // Claude finished replying to the last prompt
@@ -88,6 +89,7 @@ export class TranscriptReader {
   #reply = [];           // text blocks since the last prompt or tool call
   #said = null;          // Claude's chat message still being added to (no tool call since)
   #toolItems = new Map(); // tool_use id -> timeline item
+  #publishes = new Set(); // ids of Artifact tool calls that publish a page, awaiting their result
 
   constructor({ sidechain = false } = {}) { this.#sidechain = sidechain; }
 
@@ -102,6 +104,7 @@ export class TranscriptReader {
     return {
       ...t,
       title: this.#customTitle ?? this.#aiTitle,
+      artifacts: new Map(t.artifacts),
       // Edits whose tool call failed didn't change the file.
       files: new Map([...t.files].map(([path, f]) => [path, {
         path, edits: f.edits.map(({ item, ...edit }) => ({ ...edit, failed: Boolean(item.error) })),
@@ -151,9 +154,10 @@ export class TranscriptReader {
               this.#reply = [];
             }
           }
-        } else if (b?.type === 'tool_result' && b.is_error) {
+        } else if (b?.type === 'tool_result') {
           const item = this.#toolItems.get(b.tool_use_id);
-          if (item) item.error = true;
+          if (item && b.is_error) item.error = true;
+          if (this.#publishes.delete(b.tool_use_id) && !b.is_error) this.#published(e.toolUseResult, e.timestamp);
         }
       }
       if (images && asked) asked.images = images;
@@ -192,6 +196,8 @@ export class TranscriptReader {
         if (b.name === 'Bash' && input.command) item.command = String(input.command).slice(0, MAX_DIFF);
         t.timeline.push(item);
         this.#toolItems.set(b.id, item);
+        // Publishing a page, not reading one or uploading a file into it.
+        if (b.name === 'Artifact' && (input.action ?? 'publish') === 'publish' && !input.asset) this.#publishes.add(b.id);
 
         const path = input.file_path ?? input.notebook_path;
         if (EDIT_TOOLS.has(b.name) && path) {
@@ -202,6 +208,20 @@ export class TranscriptReader {
         }
       }
     }
+  }
+
+  // An artifact the session published, from the Artifact tool's structured result (the reply
+  // text is for Claude and may change). Publishing it again updates the same entry.
+  // Keyed by the link's id: a page published from a file carries an artifact_id too, but one
+  // created from a type (a doc) doesn't.
+  #published(r, ts) {
+    const id = typeof r?.url === 'string' && r.url.match(/^https:\/\/claude\.ai\/(?:code\/)?artifact\/([\w-]+)/)?.[1];
+    if (!id) return;
+    const a = this.#t.artifacts.get(id) ?? { id, publishedAt: ts };
+    this.#t.artifacts.set(id, {
+      ...a, url: r.url, title: r.title || a.title || null, version: Number.isInteger(r.seq) ? r.seq : a.version ?? null, // the "Version n" people see
+      audience: r.audience ?? a.audience ?? null, updatedAt: ts,
+    });
   }
 }
 

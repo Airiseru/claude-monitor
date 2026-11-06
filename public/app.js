@@ -36,7 +36,7 @@ let starting = null;         // { cwd, prompt, model } while a new session spins
 let renaming = null;         // { id, value, error, busy } while a title is being edited
 const filter = { text: '', project: '' }; // sidebar search and project filter
 const openAgents = new Set(); // Agent tool-call ids whose subagent work is expanded
-let detailTab = 'timeline';   // 'timeline' | 'chat' | 'terminal': what the session panel shows below its header
+let detailTab = 'timeline';   // 'project' | 'timeline' | 'chat' | 'terminal': what the session panel shows below its header
 let chatToEnd = false;        // scroll the chat to its latest message on the next draw
 let copied = null;            // which command was just copied: 'resume:<id>' or 'attach:<id>'
 
@@ -541,7 +541,9 @@ function card(s) {
         h('span', { class: 'dot', 'aria-hidden': 'true' }),
         h('span', { class: 'card-title' }, titleOf(s)),
         h('span', { class: 'ago' }, ago(s.lastEventAt))),
-      (dir || ctx) && h('div', { class: 'card-meta' }, h('span', { class: 'card-dir' }, dir || ''), ctx),
+      (dir || ctx) && h('div', { class: 'card-meta' }, h('span', { class: 'card-dir' }, dir || ''),
+        s.artifacts > 0 && h('span', { class: 'card-artifacts', title: `${s.artifacts} artifact${s.artifacts > 1 ? 's' : ''} published` }, `◆ ${s.artifacts}`),
+        ctx),
       s.need && h('div', { class: 'card-line need-line' }, needLine(s.need))),
     removable && h('button', { class: 'card-remove', 'aria-label': `Remove “${titleOf(s)}” from the list`, onclick: () => removeSessions([s.id]) }, '×'),
     actions && h('div', { class: 'card-actions' }, actions));
@@ -1045,12 +1047,7 @@ function renderDetail() {
         h('span', { class: `pill ${s.status}` }, STATUS_LABEL[s.status] ?? s.status),
         renaming?.id === s.id ? renameForm(s)
           : [h('h1', {}, titleOf(s)), h('button', { class: 'link', onclick: () => startRename(s) }, 'Rename')]),
-      h('div', { class: 'meta' }, [s.cwd && s.cwd.replace(/^\/Users\/[^/]+/, '~'), s.branch, s.model].filter(Boolean).join('  ·  ')),
-      sessionIdRow(s),
-      stats(s),
       h('div', { class: 'detail-actions' },
-        s.terminal?.attach && copyButton(`attach:${s.id}`, s.terminal.attach, 'Copy attach command', 'btn',
-          'Paste it into a Warp tab to open this session’s terminal'),
         warpButton(),
         !LIVE.has(s.status) && h('button', { class: 'btn', onclick: () => removeSessions([s.id]) }, 'Remove from list'))),
     needSection(s),
@@ -1063,7 +1060,8 @@ function renderDetail() {
         d?.lastResponse && replySection(s, d)],
       !d ? h('p', { class: 'empty' }, 'Loading…')
         : d.error ? h('p', { class: 'empty' }, d.error)
-          : detailTab === 'chat' ? chatSection(d) : detailTab === 'terminal' ? terminalSection(s) : [filesSection(d), timelineSection(d)]),
+          : detailTab === 'chat' ? chatSection(d) : detailTab === 'terminal' ? terminalSection(s)
+            : detailTab === 'project' ? projectSection(s, d) : timelineSection(d)),
   );
   if (detailTab === 'chat' && (atEnd || chatToEnd)) {
     content.scrollTop = content.scrollHeight;
@@ -1087,9 +1085,46 @@ function copyButton(key, command, label, cls = 'link', title = command) {
 // running in the monitor's tmux is opened with its attach command instead.
 function sessionIdRow(s) {
   return h('div', { class: 'session-id' },
-    h('span', { class: 'muted' }, 'Session'),
     h('code', {}, s.id),
-    !s.terminal?.live && copyButton(`resume:${s.id}`, `claude --resume ${s.id}`, 'Copy resume command'));
+    s.terminal?.live
+      ? s.terminal.attach && copyButton(`attach:${s.id}`, s.terminal.attach, 'Copy attach command', 'link',
+        'Paste it into a Warp tab to open this session’s terminal')
+      : copyButton(`resume:${s.id}`, `claude --resume ${s.id}`, 'Copy resume command'));
+}
+
+// Project tab: everything about the session's project in one place — where it runs, what it
+// has used, the artifacts it published and the files it changed.
+function projectSection(s, d) {
+  const fact = (label, value) => value && [h('dt', {}, label), h('dd', {}, value)];
+  return [
+    h('section', { class: 'block' },
+      h('h2', {}, 'Session'),
+      h('dl', { class: 'facts' },
+        fact('Id', sessionIdRow(s)),
+        fact('Directory', s.cwd && h('code', {}, s.cwd.replace(/^\/Users\/[^/]+/, '~'))),
+        fact('Branch', s.branch),
+        fact('Model', s.model && modelName(s.model)))),
+    stats(s) && h('section', { class: 'block' }, h('h2', {}, 'Usage'), stats(s)),
+    artifactsSection(d),
+    filesSection(d),
+  ];
+}
+
+const AUDIENCE = { owner: 'Private', users: 'Shared' };
+
+// Artifacts the session published on claude.ai, most recently updated first.
+function artifactsSection(d) {
+  const list = d.artifacts ?? [];
+  return h('section', { class: 'block' },
+    h('h2', {}, 'Artifacts ', h('span', { class: 'count' }, list.length)),
+    !list.length ? h('p', { class: 'muted' }, 'No artifacts published in this session.')
+      : h('ul', { class: 'artifacts' }, list.map((a) => h('li', { class: 'artifact' },
+        h('a', { href: a.url, target: '_blank', rel: 'noopener noreferrer', class: 'artifact-title' }, a.title || a.url),
+        h('span', { class: 'muted' }, [
+          a.version && `Version ${a.version}`,
+          AUDIENCE[a.audience],
+          a.updatedAt && `updated ${ago(Date.parse(a.updatedAt))}`,
+        ].filter(Boolean).join(' · '))))));
 }
 
 // The tabs stay pinned to the top while you scroll. Switching tabs from further down shows the
@@ -1109,7 +1144,7 @@ function setTab(tab) {
 }
 
 function detailTabs(s) {
-  const tabs = [['timeline', 'Timeline'], ['chat', 'Chat history'], ...(s.terminal?.live ? [['terminal', 'Terminal']] : [])];
+  const tabs = [['project', 'Project'], ['timeline', 'Timeline'], ['chat', 'Chat history'], ...(s.terminal?.live ? [['terminal', 'Terminal']] : [])];
   return h('div', {
     class: 'tabs', role: 'tablist', 'aria-label': 'Session view',
     onkeydown: (e) => {

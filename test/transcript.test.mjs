@@ -193,3 +193,33 @@ test('a file that is rewritten shorter is read again from the start', async () =
   const t = await file.read();
   assert.deepEqual(t.timeline.map((i) => i.text), ['only']);
 });
+
+test('lists the artifacts a session published, docs included; a new version updates the same entry', () => {
+  const use = (id, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Artifact', input }] } });
+  const result = (id, ts, toolUseResult, is_error = false) => ({
+    type: 'user', timestamp: ts, toolUseResult,
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error, content: 'Published …' }] },
+  });
+  const published = (seq, audience) => ({ url: 'https://claude.ai/artifact/abc', artifact_id: 'a1', title: 'Report', seq, version: `v-${seq}`, audience });
+  const t = parseTranscript(jsonl([
+    use('p1', { file_path: '/s/report.html' }),
+    result('p1', '2026-11-04T01:00:00Z', published(1, 'owner')),
+    use('r1', { action: 'read', url: 'https://claude.ai/artifact/other' }),
+    result('r1', '2026-11-04T01:01:00Z', { url: 'https://claude.ai/artifact/other', artifact_id: 'a2', title: 'Someone else’s' }),
+    use('u1', { url: 'https://claude.ai/artifact/abc', file_path: '/s/logo.png', asset: true }),
+    result('u1', '2026-11-04T01:02:00Z', { url: 'https://claude.ai/artifact/abc', artifact_id: 'a1', title: 'Report', seq: 9 }),
+    use('p2', { action: 'publish', file_path: '/s/report.html', url: 'https://claude.ai/artifact/abc' }),
+    result('p2', '2026-11-04T01:03:00Z', published(2, 'users')),
+    use('d1', { type_url: 'https://claude.ai/artifact/DocsType', title: 'Notes' }),
+    result('d1', '2026-11-04T01:03:30Z', { created_from_type: true, url: 'https://claude.ai/artifact/doc9', title: 'Notes', version: 'v-1' }),
+    use('p3', { file_path: '/s/broken.html' }),
+    result('p3', '2026-11-04T01:04:00Z', { url: 'https://claude.ai/artifact/zzz', artifact_id: 'a3', title: 'Broken' }, true),
+  ]));
+  assert.deepEqual([...t.artifacts.values()], [{
+    id: 'abc', url: 'https://claude.ai/artifact/abc', title: 'Report', version: 2, audience: 'users',
+    publishedAt: '2026-11-04T01:00:00Z', updatedAt: '2026-11-04T01:03:00Z',
+  }, {
+    id: 'doc9', url: 'https://claude.ai/artifact/doc9', title: 'Notes', version: null, audience: null,
+    publishedAt: '2026-11-04T01:03:30Z', updatedAt: '2026-11-04T01:03:30Z',
+  }]);
+});
