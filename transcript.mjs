@@ -89,7 +89,7 @@ export class TranscriptReader {
   #reply = [];           // text blocks since the last prompt or tool call
   #said = null;          // Claude's chat message still being added to (no tool call since)
   #toolItems = new Map(); // tool_use id -> timeline item
-  #artifactCalls = new Map(); // Artifact tool call id -> 'publish' | 'delete', awaiting its result
+  #artifactCalls = new Map(); // tool call id -> what it does to an artifact (see artifactCall), awaiting its result
 
   constructor({ sidechain = false } = {}) { this.#sidechain = sidechain; }
 
@@ -159,10 +159,7 @@ export class TranscriptReader {
           if (item && b.is_error) item.error = true;
           const call = this.#artifactCalls.get(b.tool_use_id);
           this.#artifactCalls.delete(b.tool_use_id);
-          if (call === 'publish' && !b.is_error) this.#published(e.toolUseResult, e.timestamp);
-          if (call === 'delete' && !b.is_error && e.toolUseResult?.artifact_delete?.deleted) {
-            this.#t.artifacts.delete(artifactId(e.toolUseResult.artifact_delete.url));
-          }
+          if (call && !b.is_error) this.#artifactResult(call, e.toolUseResult, resultText(b.content), e.timestamp);
         }
       }
       if (images && asked) asked.images = images;
@@ -201,13 +198,8 @@ export class TranscriptReader {
         if (b.name === 'Bash' && input.command) item.command = String(input.command).slice(0, MAX_DIFF);
         t.timeline.push(item);
         this.#toolItems.set(b.id, item);
-        // Publishing a page, not reading one or uploading a file into it.
-        // Publishing or deleting a whole page, not reading one or adding/removing a file in it.
-        if (b.name === 'Artifact') {
-          const action = input.action ?? 'publish';
-          if (action === 'publish' && !input.asset) this.#artifactCalls.set(b.id, 'publish');
-          if (action === 'delete' && !input.path) this.#artifactCalls.set(b.id, 'delete');
-        }
+        const call = artifactCall(b.name, input);
+        if (call) this.#artifactCalls.set(b.id, call);
 
         const path = input.file_path ?? input.notebook_path;
         if (EDIT_TOOLS.has(b.name) && path) {
@@ -220,19 +212,71 @@ export class TranscriptReader {
     }
   }
 
-  // An artifact the session published, from the Artifact tool's structured result (the reply
-  // text is for Claude and may change). Publishing it again updates the same entry.
-  // Keyed by the link's id: a page published from a file carries an artifact_id too, but one
-  // created from a type (a doc) doesn't.
-  #published(r, ts) {
-    const id = artifactId(r?.url);
-    if (!id) return;
-    const a = this.#t.artifacts.get(id) ?? { id, publishedAt: ts };
-    this.#t.artifacts.set(id, {
-      ...a, url: r.url, title: r.title || a.title || null, version: Number.isInteger(r.seq) ? r.seq : a.version ?? null, // the "Version n" people see
-      audience: r.audience ?? a.audience ?? null, updatedAt: ts,
-    });
+  // Applies a successful artifact call to the session's list. Entries are keyed by the link's id:
+  // a page published from a file carries an artifact_id too, but a doc doesn't.
+  #artifactResult(call, r, text, ts) {
+    const list = this.#t.artifacts;
+    const upsert = (id, fields) => {
+      const a = list.get(id) ?? { id, title: null, version: null, audience: null, publishedAt: ts };
+      list.set(id, { ...a, ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null)), updatedAt: ts });
+    };
+    const byDoc = (docId) => [...list.values()].find((a) => a.docId === docId);
+    switch (call.kind) {
+      case 'publish': { // Artifact tool: its structured result
+        const id = artifactId(r?.url);
+        if (id) upsert(id, { url: r.url, title: r.title || null, version: Number.isInteger(r.seq) ? r.seq : null, audience: r.audience });
+        break;
+      }
+      case 'delete':
+        if (r?.artifact_delete?.deleted) list.delete(artifactId(r.artifact_delete.url));
+        break;
+      case 'doc-create': { // Claude Docs connector: its reply is JSON text (+ a trailer for Claude) naming the doc's frame
+        const frame = parseJson(text.match(/"frame":(\{[^{}]*\})/)?.[1]);
+        const id = artifactId(frame?.url);
+        if (id) upsert(id, { url: frame.url, title: call.title, docId: frame.slug });
+        break;
+      }
+      case 'doc-edit': {
+        const a = byDoc(call.docId);
+        if (a) upsert(a.id, {});
+        break;
+      }
+      case 'doc-delete': {
+        const a = byDoc(call.docId);
+        if (a) list.delete(a.id);
+        break;
+      }
+    }
   }
+}
+
+// What a tool call does to an artifact, if anything: the Artifact tool publishing or deleting a
+// whole page (not reading one, or adding/removing a file in it), or the Claude Docs connector
+// creating, editing or deleting a doc (a doc is an artifact too).
+function artifactCall(name, input) {
+  if (name === 'Artifact') {
+    const action = input.action ?? 'publish';
+    if (action === 'publish' && !input.asset) return { kind: 'publish' };
+    if (action === 'delete' && !input.path) return { kind: 'delete' };
+    return null;
+  }
+  const docs = name.match(/^mcp__.*Claude_Docs__(batch|update|delete)$/)?.[1];
+  if (!docs) return null;
+  const c = input.container;
+  if (docs === 'batch' && c?.create) return { kind: 'doc-create', title: typeof c.create.name === 'string' ? c.create.name : null };
+  if (docs === 'delete' && input.ref?.object === 'project' && input.ref.id) return { kind: 'doc-delete', docId: input.ref.id };
+  if (docs !== 'delete' && typeof c?.id === 'string') return { kind: 'doc-edit', docId: c.id };
+  return null;
+}
+
+// A tool result's text: a string, or the text blocks of a list.
+function resultText(content) {
+  if (typeof content === 'string') return content;
+  return Array.isArray(content) ? content.map((x) => (x?.type === 'text' ? x.text : '')).join('') : '';
+}
+
+function parseJson(text) {
+  try { return JSON.parse(text); } catch { return null; }
 }
 
 // The id in a claude.ai artifact link, or null for anything else.

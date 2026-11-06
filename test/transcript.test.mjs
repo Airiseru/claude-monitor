@@ -229,3 +229,25 @@ test('lists the artifacts a session published, docs included; a new version upda
     publishedAt: '2026-11-04T01:03:30Z', updatedAt: '2026-11-04T01:03:30Z',
   }]);
 });
+
+test('a doc made through the Claude Docs connector is listed, edits update it, a delete removes it', () => {
+  const C = 'mcp__claude_ai_Claude_Docs__';
+  const call = (id, name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: C + name, input }] } });
+  const reply = (id, ts, text) => ({ type: 'user', timestamp: ts, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text }] }] } });
+  const born = (slug, link) => `{"verdict":"allow","created":{"bound":true},"frame":{"slug":"${slug}","url":"https://claude.ai/artifact/${link}"}}\n\nTrailer for Claude: open the doc.`;
+  const entries = [
+    call('b1', 'batch', { container: { kind: 'project', create: { name: 'Market research', doc: { markdown: '# x' } } }, batch: [] }),
+    reply('b1', '2026-11-04T01:00:00Z', born('uuid-1', 'Link1')),
+    call('u1', 'update', { container: { kind: 'project', id: 'uuid-1' }, ref: { object: 'node', id: 'n' }, payload: {} }),
+    reply('u1', '2026-11-04T01:05:00Z', '{"verdict":"allow"}'),
+    call('b2', 'batch', { container: { kind: 'project', create: { name: 'Scratch' } }, batch: [] }),
+    reply('b2', '2026-11-04T01:06:00Z', born('uuid-2', 'Link2')),
+    call('d1', 'delete', { ref: { object: 'project', id: 'uuid-2' } }),
+    reply('d1', '2026-11-04T01:07:00Z', '{"verdict":"allow"}'),
+  ];
+  const t = parseTranscript(jsonl(entries));
+  assert.deepEqual([...t.artifacts.values()], [{
+    id: 'Link1', url: 'https://claude.ai/artifact/Link1', title: 'Market research', docId: 'uuid-1', version: null, audience: null,
+    publishedAt: '2026-11-04T01:00:00Z', updatedAt: '2026-11-04T01:05:00Z',
+  }]);
+});
