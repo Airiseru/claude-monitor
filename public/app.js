@@ -36,6 +36,7 @@ let starting = null;         // { cwd, prompt, model } while a new session spins
 let renaming = null;         // { id, value, error, busy } while a title is being edited
 const filter = { text: '', project: '' }; // sidebar search and project filter
 const openAgents = new Set(); // Agent tool-call ids whose subagent work is expanded
+let selectedAgent = null;      // agent id of the subagent shown in place of its session's tabs
 let detailTab = 'timeline';   // 'project' | 'timeline' | 'chat' | 'terminal': what the session panel shows below its header
 let chatToEnd = false;        // scroll the chat to its latest message on the next draw
 let copied = null;            // which command was just copied: 'resume:<id>' or 'attach:<id>'
@@ -597,11 +598,22 @@ function card(s) {
         ctx),
       s.need && h('div', { class: 'card-line need-line' }, needLine(s.need))),
     removable && h('button', { class: 'card-remove', 'aria-label': `Remove “${titleOf(s)}” from the list`, onclick: () => removeSessions([s.id]) }, '×'),
-    actions && h('div', { class: 'card-actions' }, actions));
+    actions && h('div', { class: 'card-actions' }, actions),
+    s.subagents?.length > 0 && h('ul', { class: 'card-agents', 'aria-label': 'Running subagents' }, s.subagents.map((a) => {
+      const current = s.id === selectedId && a.agentId === selectedAgent;
+      return h('li', {}, h('button', {
+        class: `card-agent working${current ? ' selected' : ''}`, 'aria-current': current ? 'true' : null,
+        title: a.description ?? '', onclick: () => select(s.id, a.agentId),
+      }, h('span', { class: 'dot', 'aria-hidden': 'true' }), h('span', { class: 'card-agent-name' }, agentName(a))));
+    })));
 }
 
-function select(id) {
+// Opens a session, or with `agentId`, one of its subagents.
+function select(id, agentId = null) {
   newSessionOpen = false;
+  const same = id === selectedId;
+  selectedAgent = agentId;
+  if (same && detail?.id === id) { render(); document.getElementById('detail-content').scrollTop = 0; return; } // already loaded
   selectedId = id;
   history.replaceState(null, '', id ? `#${encodeURIComponent(id)}` : location.pathname);
   detail = null;
@@ -1110,6 +1122,7 @@ function renderDetail() {
         !LIVE.has(s.status) && h('button', { class: 'btn', onclick: () => removeSessions([s.id]) }, 'Remove from list'))),
     needSection(s),
     s.status === 'working' && s.activity && h('p', { class: 'now' }, h('strong', {}, 'Now: '), s.activity),
+    selectedAgent ? agentView(s, d) : [
     runningSubagents(d),
     detailTabs(s),
     h('div', { id: 'detail-panel', role: 'tabpanel', 'aria-labelledby': `tab-${detailTab}` },
@@ -1119,9 +1132,9 @@ function renderDetail() {
       !d ? h('p', { class: 'empty' }, 'Loading…')
         : d.error ? h('p', { class: 'empty' }, d.error)
           : detailTab === 'chat' ? chatSection(d) : detailTab === 'terminal' ? terminalSection(s)
-            : detailTab === 'project' ? projectSection(s, d) : timelineSection(d)),
+            : detailTab === 'project' ? projectSection(s, d) : timelineSection(d))],
   );
-  if (detailTab === 'chat' && (atEnd || chatToEnd)) {
+  if (detailTab === 'chat' && !selectedAgent && (atEnd || chatToEnd)) {
     content.scrollTop = content.scrollHeight;
     if (d) chatToEnd = false;
   } else {
@@ -1380,30 +1393,58 @@ function timelineSection(d) {
                 subagentWork(d.subagents?.find((a) => a.toolUseId && a.toolUseId === it.id))])))));
 }
 
-// What a subagent did, folded under the Agent call that started it.
+const agentName = (a) => `${a.type ?? 'Subagent'}${a.description ? `: ${a.description}` : ''}`;
+const toolCount = (a) => `${a.toolCount} tool call${a.toolCount === 1 ? '' : 's'}`;
+
+// What a subagent did, folded under the Agent call that started it. "Open" shows it on its own.
 function subagentWork(a) {
   if (!a) return null;
   const open = openAgents.has(a.toolUseId);
   const toggle = () => { open ? openAgents.delete(a.toolUseId) : openAgents.add(a.toolUseId); renderDetail(); };
   return h('div', { class: 'subagent' },
     h('button', { class: 'link', 'aria-expanded': String(open), onclick: toggle },
-      `${open ? '▾' : '▸'} ${a.type ?? 'Subagent'}: ${a.toolCount} tool call${a.toolCount === 1 ? '' : 's'} · ${a.finished ? 'finished' : 'still running'}`),
-    open && h('div', { class: 'subagent-body' },
-      a.prompt && h('details', {}, h('summary', {}, 'What it was asked'), h('p', { class: 'sub-prompt' }, a.prompt)),
-      a.tools.length ? h('ol', { class: 'timeline sub-tools' }, a.tools.map((t) =>
-        h('li', { class: `tl${t.error ? ' tl-error' : ''}` },
-          h('span', { class: 'tl-time' }, t.ts ? clock(t.ts) : ''),
-          h('div', { class: 'tl-body' }, h('span', { class: 'tag' }, t.tool), h('span', { class: 'tl-text' }, t.text),
-            t.error && h('span', { class: 'tag err' }, 'failed')))))
-        : h('p', { class: 'muted' }, 'No tool calls.'),
-      a.reply && h('div', {}, h('h3', { class: 'sub-h' }, 'Its reply'), h('div', { class: 'reply md' }, renderMarkdown(a.reply)))));
+      `${open ? '▾' : '▸'} ${a.type ?? 'Subagent'}: ${toolCount(a)} · ${a.finished ? 'finished' : 'still running'}`),
+    h('button', { class: 'link sub-open', onclick: () => select(selectedId, a.agentId) }, 'Open'),
+    open && h('div', { class: 'subagent-body' }, subagentBody(a, { promptOpen: false })));
 }
 
+// A subagent's prompt, tool calls (oldest first, as it worked) and reply.
+function subagentBody(a, { promptOpen }) {
+  return [
+    a.prompt && h('details', { open: promptOpen || null }, h('summary', {}, 'What it was asked'), h('p', { class: 'sub-prompt' }, a.prompt)),
+    a.tools.length ? h('ol', { class: 'timeline sub-tools' }, a.tools.map((t) =>
+      h('li', { class: `tl${t.error ? ' tl-error' : ''}` },
+        h('span', { class: 'tl-time' }, t.ts ? clock(t.ts) : ''),
+        h('div', { class: 'tl-body' }, h('span', { class: 'tag' }, t.tool), h('span', { class: 'tl-text' }, t.text),
+          t.error && h('span', { class: 'tag err' }, 'failed'),
+          t.command && t.command !== t.text && h('code', { class: 'cmd' }, t.command)))))
+      : h('p', { class: 'muted' }, 'No tool calls yet.'),
+    a.reply && h('div', {}, h('h3', { class: 'sub-h' }, a.finished ? 'Its reply' : 'Latest message'), h('div', { class: 'reply md' }, renderMarkdown(a.reply))),
+  ];
+}
+
+// One subagent, in place of its session's tabs. It updates as the session's hooks report its
+// tool calls, like the rest of the detail.
+function agentView(s, d) {
+  const back = h('button', { class: 'link', onclick: () => select(s.id) }, `← Back to ${titleOf(s)}`);
+  const a = d?.subagents?.find((x) => x.agentId === selectedAgent);
+  if (!a) return [back, h('p', { class: 'empty' }, !d ? 'Loading…' : d.error ?? 'This subagent isn’t in the transcript yet.')];
+  const running = !a.finished && s.subagents?.some((x) => x.agentId === a.agentId);
+  return h('section', { class: 'block agent-view' },
+    back,
+    h('div', { class: 'detail-title' },
+      h('span', { class: `pill ${running ? 'working' : 'waiting'}` }, running ? 'Running' : a.finished ? 'Finished' : 'Stopped'),
+      h('h2', {}, agentName(a))),
+    h('p', { class: 'meta' }, [toolCount(a), a.startedAt && `started ${clock(a.startedAt)}`, a.updatedAt && `last active ${clock(a.updatedAt)}`].filter(Boolean).join('  ·  ')),
+    subagentBody(a, { promptOpen: true }));
+}
+
+// The session's running subagents, each opening its own view.
 function runningSubagents(d) {
   const running = (d?.subagents ?? []).filter((a) => !a.finished);
   if (!running.length) return null;
-  return h('p', { class: 'now' }, h('strong', {}, `Subagent${running.length > 1 ? 's' : ''} running: `),
-    running.map((a) => `${a.type ?? 'agent'} (${a.description ?? 'no description'})`).join(', '));
+  return h('div', { class: 'now running-agents' }, h('strong', {}, `Subagent${running.length > 1 ? 's' : ''} running:`),
+    running.map((a) => h('button', { class: 'chip', onclick: () => select(selectedId, a.agentId), title: 'See what it’s doing' }, agentName(a))));
 }
 
 // --- rename --------------------------------------------------------------------------------

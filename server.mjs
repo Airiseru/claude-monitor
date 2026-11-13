@@ -213,18 +213,16 @@ async function readSubagents(transcriptPath) {
   return out.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
 }
 
-// Hooks fire before the transcript is written, so re-read it shortly after the last event.
-const refreshTimers = new Map();
-// How many of a session's subagents are still running, from their meta files. One that isn't
-// marked finished but hasn't written to its transcript for a while is taken as gone (its session
-// was killed, say), so it can't hold the count up forever.
-const runningAgents = new Map(); // session id -> number of its subagents still running
+// A session's subagents that are still running, from their meta files. One that isn't marked
+// finished but hasn't written to its transcript for a while is taken as gone (its session was
+// killed, say), so it can't count as running forever.
+const runningAgents = new Map(); // session id -> [{ agentId, type, description }] still running
 const finishedMeta = new Set();  // subagent meta files already marked finished; they won't change
 const STALE_AGENT_MS = 10 * 60_000;
 async function countRunningAgents(s) {
   if (!s?.transcriptPath) return;
   const dir = join(s.transcriptPath.replace(/\.jsonl$/, ''), 'subagents');
-  let n = 0;
+  const running = [];
   for (const file of await readdir(dir).catch(() => [])) {
     const agentId = file.match(/^agent-([\w-]+)\.meta\.json$/)?.[1];
     const path = join(dir, file);
@@ -232,11 +230,16 @@ async function countRunningAgents(s) {
     const meta = await readFile(path, 'utf8').then(JSON.parse).catch(() => null);
     if (meta?.finished) { finishedMeta.add(path); continue; }
     const st = await stat(join(dir, `agent-${agentId}.jsonl`)).catch(() => null);
-    if (meta && st && Date.now() - st.mtimeMs < STALE_AGENT_MS) n++;
+    if (meta && st && Date.now() - st.mtimeMs < STALE_AGENT_MS) {
+      running.push({ agentId, type: meta.agentType ?? null, description: meta.description ?? null, startedAt: st.birthtimeMs });
+    }
   }
-  runningAgents.set(s.id, n);
+  running.sort((a, b) => a.startedAt - b.startedAt);
+  runningAgents.set(s.id, running.map(({ startedAt, ...a }) => a));
 }
 
+// Hooks fire before the transcript is written, so re-read it shortly after the last event.
+const refreshTimers = new Map();
 function refreshSoon(id) {
   clearTimeout(refreshTimers.get(id));
   refreshTimers.set(id, setTimeout(async () => {
@@ -346,7 +349,8 @@ function summary(s) {
     cost,
     artifacts: t?.artifacts?.size ?? 0, // how many it published; the detail lists them
     alerts: { needs: s.needCount ?? 0, done: s.doneCount ?? 0 }, // counts that go up; see sessions.mjs
-    runningSubagents: runningAgents.get(s.id) ?? 0,
+    runningSubagents: runningAgents.get(s.id)?.length ?? 0,
+    subagents: runningAgents.get(s.id) ?? [], // the running ones; the detail has them all, with their work
     // Runs (or ran) in the monitor's tmux, so it takes messages from the page. live: running
     // right now; attach: the command that opens it in a terminal; here: started from the page.
     terminal: owned ? { live: terminals.isLive(s.id), attach: terminals.attachCommand(s.id), here: Boolean(owned.here) } : null,

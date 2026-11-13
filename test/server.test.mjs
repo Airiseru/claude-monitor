@@ -172,6 +172,27 @@ test('hook events move a session through its statuses', async () => {
   assert.equal((await sessionNow()).status, 'waiting');
 });
 
+test('running subagents are listed with the session, and the detail has their work', async () => {
+  const dir = join(projects, '-work', SESSION, 'subagents');
+  mkdirSync(dir, { recursive: true });
+  const meta = { agentType: 'Explore', description: 'Find the config', toolUseId: 't9' };
+  writeFileSync(join(dir, 'agent-a1.meta.json'), JSON.stringify(meta));
+  const ts = new Date().toISOString();
+  writeFileSync(join(dir, 'agent-a1.jsonl'), [
+    { type: 'user', isSidechain: true, timestamp: ts, message: { role: 'user', content: 'Where is the config?' } },
+    { type: 'assistant', isSidechain: true, timestamp: ts, message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 's1', name: 'Grep', input: { pattern: 'config' } }] } },
+  ].map((l) => JSON.stringify(l)).join('\n') + '\n');
+  await hook({ hook_event_name: 'Stop' }); // a finished turn recounts the running subagents
+  assert.deepEqual((await sessionNow()).subagents, [{ agentId: 'a1', type: 'Explore', description: 'Find the config' }]);
+  assert.equal((await sessionNow()).runningSubagents, 1);
+  const a = (await request('GET', `/api/sessions/${SESSION}`)).json().subagents.find((x) => x.agentId === 'a1');
+  assert.equal(a.prompt, 'Where is the config?');
+  assert.deepEqual(a.tools.map((t) => t.tool), ['Grep']);
+  writeFileSync(join(dir, 'agent-a1.meta.json'), JSON.stringify({ ...meta, finished: true }));
+  await hook({ hook_event_name: 'Stop' });
+  assert.deepEqual((await sessionNow()).subagents, [], 'a finished one leaves the list');
+});
+
 test('permission requests pass straight through when no dashboard is open', async () => {
   const res = await hook({ hook_event_name: 'PermissionRequest', tool_name: 'WebFetch', tool_input: { url: 'https://a.dev' } }, '/permission');
   assert.equal(res.status, 200);
