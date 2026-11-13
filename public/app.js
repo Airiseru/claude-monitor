@@ -307,13 +307,15 @@ function renderAttachments(box, list, changed) {
   box.hidden = !list.length;
 }
 
-// Paste and drag-and-drop of images onto `zone`; text pastes are left alone.
-function acceptImages(zone, onFiles) {
+// Paste and drag-and-drop onto `zone`. Images become attachments (onImages). Any other file or
+// folder dropped there goes into the `text` box as its path on this Mac (see insertPaths).
+// Text pastes are left alone.
+function acceptFiles(zone, { onImages, text, session, status }) {
   zone.addEventListener('paste', (e) => {
     const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
     if (!files.length) return;
     e.preventDefault();
-    onFiles(files);
+    onImages(files);
   });
   zone.addEventListener('dragover', (e) => {
     if (![...(e.dataTransfer?.types ?? [])].includes('Files')) return;
@@ -325,8 +327,54 @@ function acceptImages(zone, onFiles) {
     if (!e.dataTransfer?.files.length) return;
     e.preventDefault();
     zone.classList.remove('dropping');
-    onFiles(e.dataTransfer.files);
+    // Folders show up as files too; only the entry tells them apart, and only during the drop.
+    const dropped = [...e.dataTransfer.items].filter((i) => i.kind === 'file')
+      .map((i) => ({ file: i.getAsFile(), folder: Boolean(i.webkitGetAsEntry?.()?.isDirectory) }))
+      .filter((d) => d.file);
+    const isImage = (d) => !d.folder && d.file.type.startsWith('image/');
+    const images = dropped.filter(isImage).map((d) => d.file);
+    const others = dropped.filter((d) => !isImage(d));
+    if (images.length) onImages(images);
+    if (others.length) insertPaths(text, others, session, status);
   });
+}
+
+// --- other files in prompts ----------------------------------------------------------------
+
+// The page never learns a dropped file's path, so the server finds it with Spotlight from its
+// name, size and modified time. If Spotlight can't (an unindexed folder), a copy is saved next
+// to the session's images and that path goes in instead. Folders can't be copied.
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
+
+async function droppedPath({ file, folder }, session) {
+  const res = await post('/api/locate-file', { name: file.name, size: file.size, modified: file.lastModified, folder, session });
+  const found = res.ok ? (await res.json()).path : null;
+  if (found) return found;
+  if (folder) throw new Error(`Couldn’t find the folder ${file.name} on this Mac`);
+  if (file.size > MAX_FILE_BYTES) throw new Error(`Couldn’t find ${file.name}, and it’s too large to send a copy (20 MB at most)`);
+  const saved = await post('/api/save-file', { name: file.name, data: await toBase64(file), session });
+  if (!saved.ok) throw new Error(`Couldn’t add ${file.name}`);
+  return (await saved.json()).path;
+}
+
+// Puts the paths at the cursor in `text`, space-separated, quoted if they have spaces.
+async function insertPaths(text, dropped, session, status) {
+  const id = session();
+  status(`Finding ${dropped.length > 1 ? `${dropped.length} files` : dropped[0].file.name}…`);
+  const paths = [];
+  let error = null;
+  for (const d of dropped) {
+    try { paths.push(await droppedPath(d, id)); } catch (err) { error = err.message; }
+  }
+  if (session() !== id) return; // switched to another session meanwhile
+  status(error ?? '');
+  if (!paths.length) return;
+  const quoted = paths.map((p) => (/\s/.test(p) ? `"${p}"` : p)).join(' ');
+  const before = text.value.slice(0, text.selectionStart);
+  const pad = (before && !/\s$/.test(before) ? ' ' : '');
+  text.focus();
+  text.setRangeText(`${pad}${quoted} `, text.selectionStart, text.selectionEnd, 'end');
+  text.dispatchEvent(new Event('input', { bubbles: true })); // saves the draft
 }
 
 // --- reply box (sessions in the monitor's tmux) ----------------------------------------------
@@ -383,7 +431,10 @@ function attachToComposer(files) {
     renderComposerImages();
   });
 }
-acceptImages(composer.form, attachToComposer);
+acceptFiles(composer.form, {
+  onImages: attachToComposer, text: composer.text, session: () => composer.sessionId,
+  status: (msg) => { composer.status.textContent = msg; },
+});
 composer.text.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) composer.form.requestSubmit(); });
 
 composer.form.addEventListener('submit', async (e) => {
@@ -967,7 +1018,7 @@ function newSessionForm() {
   cwdSelect.value = newDraft.cwd;
   const promptInput = h('textarea', {
     id: 'new-prompt', class: 'input', rows: 6, oninput: (e) => { newDraft.prompt = e.target.value; },
-    placeholder: 'Paste images here too',
+    placeholder: 'Paste images here too, or drop files to add their paths',
   });
   // Thumbnails update in place: a full redraw waits while you're typing in the prompt.
   const strip = h('div', { class: 'attachments', 'aria-label': 'Attached images' });
@@ -1000,7 +1051,7 @@ function newSessionForm() {
     h('div', { class: 'detail-actions' },
       h('button', { type: 'submit', class: 'btn allow', disabled: !setup.tmux }, 'Start session'),
       h('button', { type: 'button', class: 'btn', onclick: () => { newSessionOpen = false; render(); } }, 'Cancel')));
-  acceptImages(form, attach);
+  acceptFiles(form, { onImages: attach, text: promptInput, session: () => null, status: (msg) => { note.textContent = msg; } });
   return form;
 }
 

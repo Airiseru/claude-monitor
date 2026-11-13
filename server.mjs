@@ -465,6 +465,70 @@ function promptText(text, images) {
   return [note, text].filter(Boolean).join(' ');
 }
 
+// --- files dropped on the page -------------------------------------------------------------
+
+// A web page gets a dropped file's name, size and modified time, never its path. This server
+// runs on your Mac, so it looks for an item with that exact name whose modified time (and, for
+// files, size) match: first with Spotlight, which is quick but may be off or not have indexed it,
+// then by walking the session's folder and your home folder. Copies that match are the same file
+// to Claude, so one inside the session's folder wins.
+const WALK_LIMIT_MS = 8000;
+const SKIP_DIRS = new Set(['node_modules', 'Library', '.Trash']);
+
+async function locateFile({ name, size, modified, folder, near }) {
+  const fits = (st) => (folder ? st.isDirectory() : st.isFile() && st.size === size) && Math.abs(st.mtimeMs - modified) < 2000;
+  const check = (p) => stat(p).then((st) => (fits(st) ? p : null), () => null);
+  const spotted = (await Promise.all((await spotlight(name)).map(check))).filter(Boolean);
+  const path = (near && spotted.find((p) => p.startsWith(near + '/'))) ?? spotted[0]
+    ?? await walkFor(name, check, [near, ...['Desktop', 'Downloads', 'Documents', ''].map((d) => join(homedir(), d))].filter(Boolean));
+  if (!path) console.error(`Couldn't locate dropped ${folder ? 'folder' : 'file'} ${JSON.stringify(name)} (size ${size}, modified ${new Date(modified).toISOString()})`);
+  return path;
+}
+
+// Paths Spotlight has for that exact file name (`mdfind -name` matches the display name, which
+// can hide the extension). Quotes, backslashes and * are escaped; the name goes in as an argument.
+function spotlight(name) {
+  const query = `kMDItemFSName == "${name.replace(/["\\*]/g, '\\$&')}"`;
+  return new Promise((resolve) => {
+    execFile('/usr/bin/mdfind', [query], { maxBuffer: 50_000_000, timeout: 5000 },
+      (err, stdout) => resolve(stdout ? stdout.split('\n').filter((p) => p && basename(p) === name) : []));
+  });
+}
+
+// Breadth-first through each root in turn (nearest first), skipping hidden folders,
+// node_modules, Library and folders already walked, until a match turns up or time runs out.
+async function walkFor(name, check, roots) {
+  const end = Date.now() + WALK_LIMIT_MS;
+  const seen = new Set();
+  for (const root of roots) {
+    const queue = [root];
+    while (queue.length && Date.now() < end) {
+      const dir = queue.shift();
+      if (seen.has(dir)) continue;
+      seen.add(dir);
+      const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+      for (const e of entries) {
+        const p = join(dir, e.name);
+        if (e.name === name && await check(p)) return p;
+        if (e.isDirectory() && !e.name.startsWith('.') && !SKIP_DIRS.has(e.name)) queue.push(p);
+      }
+    }
+  }
+  return null;
+}
+
+// A file Spotlight can't find (an excluded folder, not indexed yet) is saved as a copy instead,
+// next to the session's images, so the message still gets a path Claude can read.
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
+
+async function saveCopy(folderName, name, data) {
+  const dir = join(UPLOADS_DIR, folderName);
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, `${Date.now()}-${name.replace(/^\.+/, '')}`);
+  await writeFile(path, Buffer.from(data, 'base64'));
+  return path;
+}
+
 // --- HTTP ----------------------------------------------------------------------------------
 
 class HttpError extends Error {
@@ -587,6 +651,22 @@ async function handle(req, res) {
     const editor = await findEditor();
     execFile('/usr/bin/open', editor ? ['-a', editor.path, path] : ['-t', path], (err) => { if (err) console.error('open failed:', err.message); });
     return sendJson(res, { ok: true, editor: editor?.name ?? null });
+  }
+
+  if (req.method === 'POST' && pathname === '/api/locate-file') {
+    const { name, size, modified, folder = false, session = null } = await readJson(req, 10_000);
+    if (typeof name !== 'string' || !name || name.includes('/') || name === '.' || name === '..') throw new HttpError(400, 'Bad file name');
+    if (!Number.isFinite(modified) || (!folder && !Number.isSafeInteger(size))) throw new HttpError(400, 'Bad size or time');
+    const near = typeof session === 'string' ? sessions.get(session)?.cwd : null;
+    return sendJson(res, { path: await locateFile({ name, size, modified, folder: Boolean(folder), near }) });
+  }
+
+  if (req.method === 'POST' && pathname === '/api/save-file') {
+    const { name, data, session = null } = await readJson(req, Math.ceil((MAX_FILE_BYTES * 4) / 3) + 10_000);
+    if (typeof name !== 'string' || !name || name.includes('/') || name.length > 255) throw new HttpError(400, 'Bad file name');
+    if (session !== null && !(typeof session === 'string' && SESSION_ID.test(session))) throw new HttpError(400, 'Bad session id');
+    if (typeof data !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new HttpError(400, 'File data must be base64');
+    return sendJson(res, { path: await saveCopy(session ?? 'new-session', name, data) });
   }
 
   if (req.method === 'POST' && pathname === '/api/choose-folder') {

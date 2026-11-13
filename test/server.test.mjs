@@ -4,7 +4,7 @@
 // tmux run a stand-in for Claude Code, on a tmux socket of the tests' own (skipped without tmux).
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
@@ -232,6 +232,32 @@ test('page actions validate their input', async () => {
   assert.equal((await act('/api/new-session', { cwd: work, prompt: 'hi', images: [{ mediaType: 'image/svg+xml', data: 'AAAA' }] })).status, 400);
   assert.equal((await act('/api/new-session', { cwd: work, prompt: 'hi', images: [{ mediaType: 'image/png', data: 'not base64!' }] })).status, 400);
   assert.equal((await act('/api/new-session', { cwd: work, prompt: 'hi', images: Array(6).fill(png) })).status, 400, 'at most 5 images');
+});
+
+test('dropped files: names and data are checked, and a file Spotlight can’t find is saved as a copy', async () => {
+  assert.equal((await act('/api/locate-file', { name: '../etc', size: 1, modified: 0 })).status, 400);
+  assert.equal((await act('/api/locate-file', { name: 'a.txt', size: 'big', modified: 0 })).status, 400);
+  assert.equal((await act('/api/locate-file', { name: 'a.txt', size: 1, modified: 0 }, { withToken: false })).status, 403);
+  const missing = await act('/api/locate-file', { name: `no-such-file-${process.pid}.txt`, size: 3, modified: 0 });
+  assert.equal(missing.status, 200);
+  assert.equal(missing.json().path, null);
+  // Found where it is, without Spotlight: a file by name, size and time, a folder by name and time.
+  const deck = join(home, 'Downloads', 'Project Green', 'final_deck');
+  mkdirSync(deck, { recursive: true });
+  writeFileSync(join(deck, 'notes.md'), 'hello');
+  const at = (p) => Math.floor(statSync(p).mtimeMs);
+  const locate = async (body) => (await act('/api/locate-file', body)).json().path;
+  assert.equal(await locate({ name: 'final_deck', size: 128, modified: at(deck), folder: true }), deck);
+  assert.equal(await locate({ name: 'notes.md', size: 5, modified: at(join(deck, 'notes.md')) }), join(deck, 'notes.md'));
+  assert.equal(await locate({ name: 'notes.md', size: 6, modified: at(join(deck, 'notes.md')) }), null, 'a different size is a different file');
+  assert.equal((await act('/api/save-file', { name: 'a/b.txt', data: 'aGk=' })).status, 400);
+  assert.equal((await act('/api/save-file', { name: 'a.txt', data: 'aGk=', session: '../x' })).status, 400);
+  assert.equal((await act('/api/save-file', { name: 'a.txt', data: 'not base64!' })).status, 400);
+  const saved = await act('/api/save-file', { name: 'notes.txt', data: Buffer.from('hi').toString('base64'), session: SESSION });
+  assert.equal(saved.status, 200);
+  const { path } = saved.json();
+  assert.ok(path.startsWith(join(monitorHome, 'uploads', SESSION) + '/') && path.endsWith('-notes.txt'));
+  assert.equal(readFileSync(path, 'utf8'), 'hi');
 });
 
 test('a session started from the page runs in tmux and takes messages, images and keys', { skip: !tmux && 'tmux not installed' }, async () => {
