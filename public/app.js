@@ -1199,19 +1199,27 @@ function artifactsSection(d) {
         ].filter(Boolean).join(' · '))))));
 }
 
-// The tabs stay pinned to the top while you scroll. Switching tabs from further down shows the
-// new tab's start just under them (the chat starts at its newest message) instead of leaving
-// you partway down the other tab's content.
+// Switching tabs: the timeline opens at its top. The chat opens where you left it, or at its
+// newest message if you left it there (or haven't been to it yet). Other tabs, from further
+// down, open just under the tabs, which stay pinned to the top while you scroll.
+const chatScroll = new Map(); // session id -> where you left its chat, when not at the bottom
 function setTab(tab) {
   if (tab === detailTab) return;
   const content = document.getElementById('detail-content');
+  if (detailTab === 'chat') {
+    const atEnd = content.scrollHeight - content.scrollTop - content.clientHeight < 40;
+    if (atEnd) chatScroll.delete(selectedId); else chatScroll.set(selectedId, content.scrollTop);
+  }
   const tabs = content.querySelector('.tabs');
   const pinned = tabs && content.scrollTop > tabs.offsetTop;
+  const back = tab === 'chat' ? chatScroll.get(selectedId) : undefined;
   detailTab = tab;
-  chatToEnd = tab === 'chat';
+  chatToEnd = tab === 'chat' && back === undefined;
   if (tab === 'terminal') setTimeout(loadScreen, 0);
   renderDetail();
-  if (pinned && tab !== 'chat') content.scrollTop = content.querySelector('.tabs')?.offsetTop ?? 0;
+  if (tab === 'timeline') content.scrollTop = 0;
+  else if (back !== undefined) content.scrollTop = back;
+  else if (pinned && tab !== 'chat') content.scrollTop = content.querySelector('.tabs')?.offsetTop ?? 0;
   document.getElementById(`tab-${tab}`)?.focus({ preventScroll: true });
 }
 
