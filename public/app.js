@@ -1099,6 +1099,9 @@ function renderDetail() {
   detailDeferred = false;
   const s = sessions.find((x) => x.id === selectedId);
   const scroll = content.scrollTop;
+  // In the chat, stay pinned to the newest message if you were already at the bottom. Measured
+  // before the redraw: an emptied panel always looks scrolled to the end.
+  const atEnd = content.scrollHeight - scroll - content.clientHeight < 40;
   content.replaceChildren();
   renderComposer(s);
   if (newSessionOpen) { content.append(newSessionForm()); return; }
@@ -1109,8 +1112,6 @@ function renderDetail() {
   }
   const d = detail?.id === s.id ? detail : null;
   if (detailTab === 'terminal' && !s.terminal?.live) detailTab = 'timeline';
-  // In the chat, stay pinned to the newest message if you were already at the bottom.
-  const atEnd = content.scrollHeight - scroll - content.clientHeight < 40;
   add(content,
     h('header', { class: 'detail-head' },
       h('div', { class: 'detail-title' },
