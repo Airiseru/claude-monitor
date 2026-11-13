@@ -1134,6 +1134,7 @@ function renderDetail() {
         : d.error ? h('p', { class: 'empty' }, d.error)
           : detailTab === 'chat' ? chatSection(d) : detailTab === 'terminal' ? terminalSection(s)
             : detailTab === 'project' ? projectSection(s, d) : timelineSection(d))],
+    detailTab === 'chat' && !selectedAgent && toBottomButton(),
   );
   if (detailTab === 'chat' && !selectedAgent && (atEnd || chatToEnd)) {
     content.scrollTop = content.scrollHeight;
@@ -1141,7 +1142,26 @@ function renderDetail() {
   } else {
     content.scrollTop = scroll;
   }
+  showToBottom();
 }
+
+// In the chat, a ↓ button that jumps to the newest message. It sits at the bottom of the
+// scrolling panel and shows only while you're scrolled up from there.
+function toBottomButton() {
+  const content = document.getElementById('detail-content');
+  return h('div', { class: 'to-bottom', hidden: true },
+    h('button', {
+      type: 'button', class: 'to-bottom-btn', 'aria-label': 'Scroll to the newest message', title: 'Scroll to the newest message',
+      onclick: () => content.scrollTo({ top: content.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }),
+    }, '↓'));
+}
+
+function showToBottom() {
+  const content = document.getElementById('detail-content');
+  const box = content.querySelector('.to-bottom');
+  if (box) box.hidden = content.scrollHeight - content.scrollTop - content.clientHeight < 40;
+}
+document.getElementById('detail-content').addEventListener('scroll', showToBottom, { passive: true });
 
 // Copies a command, and says so for a moment.
 function copyButton(key, command, label, cls = 'link', title = command) {
