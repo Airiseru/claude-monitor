@@ -18,7 +18,10 @@ const PROJECTS_DIR = process.env.CLAUDE_PROJECTS_DIR ?? join(homedir(), '.claude
 const STATUS_DIR = join(MONITOR_HOME, 'status');
 const STATE_FILE = join(MONITOR_HOME, 'state.json'); // live statuses + removed sessions, kept across restarts
 const UPLOADS_DIR = join(MONITOR_HOME, 'uploads'); // images sent from the page, one folder per session
-const RECENT_MS = 36 * 3600_000;
+// A session with no events for CLOSE_MS is closed: still listed, but the page tucks it away
+// behind a toggle. After KEEP_MS it's forgotten. A pinned one stays open until you unpin it.
+const CLOSE_MS = 48 * 3600_000;
+const KEEP_MS = 5 * 24 * 3600_000;
 const MAX_HOOK_BODY = 5_000_000;
 // How long a permission request waits for a click. Just under the hook's 600 s timeout, so
 // the server always answers before Claude Code gives up on the hook.
@@ -43,6 +46,7 @@ const transcripts = new Map(); // transcript path -> TranscriptFile
 const clients = new Set();     // open SSE responses
 const pending = new PendingPermissions();
 const hidden = new Set();      // session ids removed from the list; back on their next event
+const pinned = new Set();      // session ids you pinned: never closed or forgotten
 const terminals = new Terminals({ claude: CLAUDE, home: homedir(), conf: join(import.meta.dirname, 'tmux.conf'), changed: terminalsChanged });
 
 // An event the page itself causes (a prompt sent, a session started or stopped), applied as
@@ -118,9 +122,10 @@ const SAVED_FIELDS = ['id', 'status', 'need', 'activity', 'cwd', 'transcriptPath
 async function loadState() {
   const saved = await readFile(STATE_FILE, 'utf8').then(JSON.parse).catch(() => null);
   if (!saved) return;
-  const cutoff = Date.now() - RECENT_MS;
+  for (const id of saved.pinned ?? []) if (SESSION_ID.test(id)) pinned.add(id);
+  const cutoff = Date.now() - KEEP_MS;
   for (const s of saved.sessions ?? []) {
-    if (!SESSION_ID.test(s.id ?? '') || !(s.lastEventAt >= cutoff)) continue;
+    if (!SESSION_ID.test(s.id ?? '') || !(s.lastEventAt >= cutoff || pinned.has(s.id))) continue;
     sessions.set(s.id, { ...Object.fromEntries(SAVED_FIELDS.map((k) => [k, s[k] ?? null])) });
     const t = s.transcriptPath && await readTranscript(s.transcriptPath).catch(() => null);
     // Events missed while the server was down: a turn that finished means it's waiting now.
@@ -153,6 +158,7 @@ function saveSoon() {
     const state = {
       sessions: [...sessions.values()].map((s) => Object.fromEntries(SAVED_FIELDS.map((k) => [k, s[k] ?? null]))),
       hidden: [...hidden].filter((id) => sessions.has(id)), // others have aged out of the list anyway
+      pinned: [...pinned].filter((id) => sessions.has(id)),
       owned: [...terminals.owned].filter(([id]) => sessions.has(id)),
       spend,
     };
@@ -258,7 +264,7 @@ async function loadRecentSessions() {
       if (!file.endsWith('.jsonl') || !SESSION_ID.test(id) || sessions.has(id)) continue;
       const path = join(PROJECTS_DIR, dir, file);
       const st = await stat(path).catch(() => null);
-      if (!st || Date.now() - st.mtimeMs > RECENT_MS) continue;
+      if (!st || Date.now() - st.mtimeMs > KEEP_MS) continue;
       const t = await readTranscript(path).catch(() => null);
       // Skip sessions where nothing happened (e.g. opened, /clear, closed).
       if (!t?.timeline.some((i) => i.kind === 'prompt' || i.kind === 'tool')) continue;
@@ -354,23 +360,29 @@ function summary(s) {
     // Runs (or ran) in the monitor's tmux, so it takes messages from the page. live: running
     // right now; attach: the command that opens it in a terminal; here: started from the page.
     terminal: owned ? { live: terminals.isLive(s.id), attach: terminals.attachCommand(s.id), here: Boolean(owned.here) } : null,
+    pinned: pinned.has(s.id),
+    closed: isClosed(s),
   };
 }
 
+// Quiet for CLOSE_MS, and not pinned, running in tmux or waiting on a permission answer.
+const keptOpen = (id) => pinned.has(id) || terminals.isLive(id) || pending.forSession(id).length > 0;
+const isClosed = (s, now = Date.now()) => s.lastEventAt < now - CLOSE_MS && !keptOpen(s.id);
+
 function list() {
-  const cutoff = Date.now() - RECENT_MS;
-  return [...sessions.values()].filter((s) => s.lastEventAt >= cutoff && !hidden.has(s.id)).map(summary);
+  return [...sessions.values()].filter((s) => !hidden.has(s.id)).map(summary);
 }
 
-// Sessions that have dropped out of the list (no events for RECENT_MS) are forgotten, with
-// their cached transcripts and status line snapshots, so a server that runs for weeks doesn't
-// keep every session it has ever seen. A live one stays, however long it has been quiet.
+// Sessions with no events for KEEP_MS are forgotten, with their cached transcripts and status
+// line snapshots, so a server that runs for weeks doesn't keep every session it has ever seen.
+// A pinned or live one stays, however long it has been quiet.
 async function pruneOld(now = Date.now()) {
-  const cutoff = now - RECENT_MS;
+  const cutoff = now - KEEP_MS;
   for (const [id, s] of sessions) {
-    if (s.lastEventAt >= cutoff || terminals.isLive(id) || pending.forSession(id).length) continue;
+    if (s.lastEventAt >= cutoff || keptOpen(id)) continue;
     sessions.delete(id);
     hidden.delete(id);
+    pinned.delete(id);
     terminals.owned.delete(id);
     await rm(join(UPLOADS_DIR, id), { recursive: true, force: true });
     contexts.delete(id);
@@ -399,7 +411,7 @@ async function pruneOld(now = Date.now()) {
     contexts.delete(basename(file, '.json'));
     costs.delete(basename(file, '.json'));
   }
-  saveSoon();
+  broadcast(); // saves too; and sessions that have gone quiet show as closed
 }
 
 let broadcastTimer = null;
@@ -731,6 +743,17 @@ async function handle(req, res) {
     await readTranscript(s.transcriptPath).catch(() => {});
     broadcast();
     return sendJson(res, { ok: true, title: clean });
+  }
+
+  // Pin or unpin: a pinned session is never closed or forgotten for being quiet.
+  const pin = pathname.match(/^\/api\/sessions\/([\w-]+)\/pin$/);
+  if (req.method === 'POST' && pin) {
+    if (!sessions.has(pin[1])) throw new HttpError(404, 'Not found');
+    const { pinned: on } = await readJson(req, 1000);
+    if (typeof on !== 'boolean') throw new HttpError(400, 'pinned must be true or false');
+    if (on) { pinned.add(pin[1]); hidden.delete(pin[1]); } else pinned.delete(pin[1]);
+    broadcast();
+    return sendJson(res, { ok: true, pinned: on });
   }
 
   const act = pathname.match(/^\/api\/sessions\/([\w-]+)\/(send|interrupt|end|key)$/);

@@ -6,7 +6,7 @@ const SECTIONS = [
   ['needs_you', 'Needs you'],
   ['working', 'Working'],
   ['waiting', 'Waiting for your next prompt'],
-  ['idle', 'Last 36 hours, no events since the monitor started'],
+  ['idle', 'No events since the monitor started'],
   ['ended', 'Ended'],
 ];
 const STATUS_LABEL = {
@@ -104,7 +104,8 @@ function ago(ms) {
   const s = Math.max(0, (Date.now() - ms) / 1000);
   if (s < 60) return 'just now';
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  return `${Math.floor(s / 3600)}h ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
 }
 
 function titleOf(s) {
@@ -157,6 +158,15 @@ function confirmRemove(ids) {
     document.body.append(dialog);
     dialog.showModal();
   });
+}
+
+// A pinned session never closes or drops off the list for being quiet; unpin to let it age out.
+async function setPinned(s, on) {
+  s.pinned = on; // don't wait for the server to redraw
+  if (on) s.closed = false;
+  render();
+  const res = await post(`/api/sessions/${encodeURIComponent(s.id)}/pin`, { pinned: on }).catch(() => null);
+  if (!res?.ok) { s.pinned = !on; render(); }
 }
 
 async function removeSessions(ids) {
@@ -509,10 +519,10 @@ function startingCard() {
 }
 
 // Sidebar sections: by status (Needs you first), or by project folder (most recently active
-// first, and within a project the sessions that need you first).
-const STATUS_ORDER = Object.fromEntries(SECTIONS.map(([status], i) => [status, i]));
+// first). Within a section, the session with the newest activity comes first.
 let groupBy = pref.get('group') === 'project' ? 'project' : 'status';
 let visibleOrder = []; // session ids in the order shown, for ↑/↓
+let showClosed = pref.get('closed') === 'shown'; // sessions quiet for 48 hours are tucked away unless asked for
 
 function groupSessions(list) {
   const recent = (a, b) => b.lastEventAt - a.lastEventAt;
@@ -531,7 +541,7 @@ function groupSessions(list) {
     className: 'project',
     needs: group.filter((s) => s.status === 'needs_you').length,
     latest: Math.max(...group.map((s) => s.lastEventAt)),
-    sessions: group.sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || recent(a, b)),
+    sessions: group.sort(recent),
   })).sort((a, b) => b.latest - a.latest);
 }
 
@@ -549,20 +559,35 @@ function renderList() {
   }
   if (starting) nav.append(h('h2', { class: 'section working' }, h('span', { class: 'section-label' }, 'Starting')), startingCard());
   if (!sessions.length) {
-    nav.append(h('p', { class: 'empty' }, 'No sessions in the last 36 hours.'));
+    nav.append(h('p', { class: 'empty' }, 'No sessions in the last 5 days.'));
   } else if (!shown.length) {
     nav.append(h('p', { class: 'empty' }, 'No sessions match.'));
   }
   visibleOrder = [];
-  for (const g of groupSessions(shown)) {
-    const removable = g.sessions.filter((s) => !LIVE.has(s.status));
+  // Pinned on top, then the rest grouped; closed ones last, tucked away. Newest activity first throughout.
+  const pinnedOnes = shown.filter((s) => s.pinned).sort((a, b) => b.lastEventAt - a.lastEventAt);
+  const closed = shown.filter((s) => s.closed && !s.pinned);
+  const groups = groupSessions(shown.filter((s) => !s.closed && !s.pinned));
+  if (pinnedOnes.length) groups.unshift({ label: 'Pinned', className: 'pinned', sessions: pinnedOnes });
+  if (closed.length) {
+    groups.push({
+      label: 'Closed · quiet for 48 hours', className: 'closed', toggle: true,
+      sessions: showClosed ? closed.sort((a, b) => b.lastEventAt - a.lastEventAt) : [], total: closed.length,
+    });
+  }
+  for (const g of groups) {
+    const removable = g.className === 'pinned' ? [] : g.sessions.filter((s) => !LIVE.has(s.status)); // no one-click clear of pins
     nav.append(h('h2', { class: `section ${g.className}` },
       h('span', { class: 'section-label' }, g.label),
-      h('span', { class: 'count' }, g.sessions.length),
+      h('span', { class: 'count' }, g.total ?? g.sessions.length),
       g.needs > 0 && groupBy === 'project' && h('span', { class: 'count needs' }, `${g.needs} need you`),
       removable.length > 0 && h('button', {
         class: 'link', 'aria-label': `Remove ${removable.length} from the list`, onclick: () => removeSessions(removable.map((s) => s.id)),
-      }, 'Clear')));
+      }, 'Clear'),
+      g.toggle && h('button', {
+        class: 'link', 'aria-expanded': String(showClosed),
+        onclick: () => { showClosed = !showClosed; pref.set('closed', showClosed ? 'shown' : 'hidden'); renderList(); },
+      }, showClosed ? 'Hide' : 'Show')));
     for (const s of g.sessions) { nav.append(card(s)); visibleOrder.push(s.id); }
   }
   const waiting = sessions.filter((s) => s.status === 'needs_you').length;
@@ -577,7 +602,6 @@ function renderList() {
 function card(s) {
   const dir = folder(s.cwd);
   const ctx = contextBar(s.context);
-  const removable = !LIVE.has(s.status);
   const p = s.permissions[0];
   const actions = p
     ? (s.permissions.length > 1 ? h('span', { class: 'muted' }, `${s.permissions.length} requests, open to answer`) : permissionActions(p))
@@ -585,19 +609,30 @@ function card(s) {
   return h('div', { class: `card-group${actions ? ' with-actions' : ''}` },
     h('button', {
       'data-id': s.id,
-      class: `card ${s.status}${s.id === selectedId ? ' selected' : ''}${removable ? ' removable' : ''}`,
+      class: `card ${s.status}${s.closed ? ' closed' : ''}${s.id === selectedId ? ' selected' : ''}`,
       'aria-current': s.id === selectedId ? 'true' : null,
-      onclick: () => select(s.id),
+      // A second click soon after opens the same menu as ⋯. Timed here, not with dblclick: the
+      // first click redraws the list, so the second lands on a new card.
+      onclick: (e) => {
+        const again = lastCardClick.id === s.id && e.timeStamp - lastCardClick.at < 400;
+        lastCardClick = again ? { id: null, at: 0 } : { id: s.id, at: e.timeStamp };
+        if (again) openCardMenu(s.id, e.clientX, e.clientY, e.currentTarget); else select(s.id);
+      },
+      oncontextmenu: (e) => { e.preventDefault(); openCardMenu(s.id, e.clientX, e.clientY, e.currentTarget); },
     },
       h('div', { class: 'card-top' },
         h('span', { class: 'dot', 'aria-hidden': 'true' }),
         h('span', { class: 'card-title' }, titleOf(s)),
+        s.pinned && h('span', { class: 'card-pin', title: 'Pinned: stays open until you unpin it', 'aria-label': 'Pinned' }, '📌'),
         h('span', { class: 'ago' }, ago(s.lastEventAt))),
       (dir || ctx) && h('div', { class: 'card-meta' }, h('span', { class: 'card-dir' }, dir || ''),
         s.artifacts > 0 && h('span', { class: 'card-artifacts', title: `${s.artifacts} artifact${s.artifacts > 1 ? 's' : ''} published` }, `◆ ${s.artifacts}`),
         ctx),
       s.need && h('div', { class: 'card-line need-line' }, needLine(s.need))),
-    removable && h('button', { class: 'card-remove', 'aria-label': `Remove “${titleOf(s)}” from the list`, onclick: () => removeSessions([s.id]) }, '×'),
+    h('button', {
+      class: 'card-more', 'aria-label': `More for “${titleOf(s)}”`, 'aria-haspopup': 'menu', title: 'Pin, rename, remove',
+      onclick: (e) => { const r = e.currentTarget.getBoundingClientRect(); openCardMenu(s.id, r.right, r.bottom, e.currentTarget); },
+    }, '⋯'),
     actions && h('div', { class: 'card-actions' }, actions),
     s.subagents?.length > 0 && h('ul', { class: 'card-agents', 'aria-label': 'Running subagents' }, s.subagents.map((a) => {
       const current = s.id === selectedId && a.agentId === selectedAgent;
@@ -607,6 +642,48 @@ function card(s) {
       }, h('span', { class: 'dot', 'aria-hidden': 'true' }), h('span', { class: 'card-agent-name' }, agentName(a))));
     })));
 }
+
+// A session's menu: Pin / Unpin, Rename, Remove from the list. It lives outside the sidebar,
+// which redraws on every update, and closes on a pick, Escape, a click elsewhere or a scroll.
+let cardMenu = null; // { el, returnTo }
+let lastCardClick = { id: null, at: 0 };
+function closeCardMenu(refocus = false) {
+  if (!cardMenu) return;
+  const { el, returnTo } = cardMenu;
+  cardMenu = null;
+  el.remove();
+  if (refocus && returnTo?.isConnected) returnTo.focus();
+}
+
+function openCardMenu(id, x, y, returnTo) {
+  closeCardMenu();
+  const s = sessions.find((x) => x.id === id);
+  if (!s) return;
+  const pick = (fn) => () => { closeCardMenu(); fn(); };
+  const items = [
+    h('button', { role: 'menuitem', onclick: pick(() => setPinned(s, !s.pinned)) }, s.pinned ? 'Unpin' : 'Pin'),
+    h('button', { role: 'menuitem', onclick: pick(() => { if (selectedId !== id) select(id); startRename(sessions.find((x) => x.id === id) ?? s); }) }, 'Rename'),
+    !LIVE.has(s.status) && h('button', { role: 'menuitem', class: 'danger', onclick: pick(() => removeSessions([id])) }, 'Remove from list'),
+  ].filter(Boolean);
+  const el = h('div', { class: 'card-menu', role: 'menu', 'aria-label': `Options for “${titleOf(s)}”` }, items);
+  el.addEventListener('keydown', (e) => {
+    e.stopPropagation(); // the page's own shortcuts stay out of it
+    const at = items.indexOf(document.activeElement);
+    if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); closeCardMenu(true); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); items[(at + 1) % items.length].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); items[(at - 1 + items.length) % items.length].focus(); }
+  });
+  document.body.append(el);
+  // Keep it on screen.
+  const { width, height } = el.getBoundingClientRect();
+  el.style.left = `${Math.max(4, Math.min(x, window.innerWidth - width - 4))}px`;
+  el.style.top = `${Math.max(4, Math.min(y, window.innerHeight - height - 4))}px`;
+  cardMenu = { el, returnTo };
+  items[0].focus();
+}
+document.addEventListener('pointerdown', (e) => { if (cardMenu && !cardMenu.el.contains(e.target)) closeCardMenu(); }, true);
+document.addEventListener('scroll', () => closeCardMenu(), true);
+window.addEventListener('blur', () => closeCardMenu());
 
 // Opens a session, or with `agentId`, one of its subagents.
 function select(id, agentId = null) {
@@ -1120,6 +1197,10 @@ function renderDetail() {
           : [h('h1', {}, titleOf(s)), h('button', { class: 'link', onclick: () => startRename(s) }, 'Rename')]),
       h('div', { class: 'detail-actions' },
         warpButton(),
+        h('button', {
+          class: 'btn', 'aria-pressed': String(s.pinned), onclick: () => setPinned(s, !s.pinned),
+          title: s.pinned ? 'Let it close after 48 quiet hours and drop off after 5 days' : 'Keep it open and in the list, however long it’s quiet',
+        }, s.pinned ? 'Unpin' : 'Pin'),
         !LIVE.has(s.status) && h('button', { class: 'btn', onclick: () => removeSessions([s.id]) }, 'Remove from list'))),
     needSection(s),
     s.status === 'working' && s.activity && h('p', { class: 'now' }, h('strong', {}, 'Now: '), s.activity),

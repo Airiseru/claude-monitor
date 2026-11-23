@@ -358,3 +358,40 @@ test('a removed session stays removed across a restart and comes back on new act
   await hook({ hook_event_name: 'UserPromptSubmit', prompt: 'Back again', cwd: work });
   assert.equal((await sessionNow())?.status, 'working');
 });
+
+test('quiet sessions close after 48 hours and drop off after 5 days, unless pinned', async () => {
+  const QUIET = 'aaaaaaaa-0000-0000-0000-000000000001'; // 3 days quiet: closed
+  const OLD = 'aaaaaaaa-0000-0000-0000-000000000002';   // 6 days quiet: forgotten
+  const KEPT = 'aaaaaaaa-0000-0000-0000-000000000003';  // 6 days quiet, but pinned
+  const day = 24 * 3600_000;
+  const saved = (id, daysAgo) => ({ id, status: 'waiting', cwd: work, lastEventAt: Date.now() - daysAgo * day });
+  await sleep(1300); // let the last test's changes be saved first
+  await stopServer();
+  const file = join(monitorHome, 'state.json');
+  const state = JSON.parse(readFileSync(file, 'utf8'));
+  state.sessions.push(saved(QUIET, 3), saved(OLD, 6), saved(KEPT, 6));
+  state.pinned = [KEPT];
+  writeFileSync(file, JSON.stringify(state));
+  await startServer();
+  const byId = async () => new Map((await request('GET', '/api/sessions')).json().map((s) => [s.id, s]));
+  let list = await byId();
+  assert.equal(list.get(QUIET)?.closed, true);
+  assert.equal(list.has(OLD), false);
+  assert.equal(list.get(KEPT)?.pinned, true);
+  assert.equal(list.get(KEPT)?.closed, false);
+  assert.equal(list.get(SESSION)?.closed, false);
+
+  assert.equal((await act(`/api/sessions/${QUIET}/pin`, { pinned: 'yes' })).status, 400);
+  assert.equal((await act(`/api/sessions/${OLD}/pin`, { pinned: true })).status, 404);
+  assert.equal((await act(`/api/sessions/${QUIET}/pin`, { pinned: true })).status, 200);
+  assert.equal((await act(`/api/sessions/${QUIET}/pin`, { pinned: true }, { withToken: false })).status, 403);
+  list = await byId();
+  assert.equal(list.get(QUIET).closed, false, 'pinning reopens it');
+  assert.equal((await act(`/api/sessions/${KEPT}/pin`, { pinned: false })).status, 200);
+  await sleep(1300);
+  await stopServer();
+  await startServer();
+  list = await byId();
+  assert.equal(list.get(QUIET)?.pinned, true, 'pin survives a restart');
+  assert.equal(list.has(KEPT), false, 'unpinned and over 5 days old: forgotten');
+});
