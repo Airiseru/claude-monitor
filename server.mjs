@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { CLAUDE, claudeInfo, setSessionTitle } from './agents.mjs';
 import { PendingPermissions } from './permissions.mjs';
-import { applyHook } from './sessions.mjs';
+import { applyHook, isLocalCommand } from './sessions.mjs';
 import { KEYS, Terminals } from './terminals.mjs';
 import { TranscriptFile } from './transcript.mjs';
 
@@ -778,7 +778,8 @@ async function handle(req, res) {
         try { await terminals.start({ cwd: owned.cwd, model: owned.model, prompt: message, resume: id }); } catch (err) { throw new HttpError(502, err.message); }
       }
       pageEvent({ session_id: id, hook_event_name: 'UserPromptSubmit', prompt: promptText(text.trim(), images) });
-      return sendJson(res, { ok: true });
+      // A command that runs in the terminal answers there (or opens a menu), not in the chat.
+      return sendJson(res, { ok: true, local: isLocalCommand(text) });
     }
     if (!live) throw new HttpError(409, 'This session isn’t running');
     if (action === 'clear') {

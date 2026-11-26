@@ -88,6 +88,7 @@ export class TranscriptReader {
   #aiTitle = null;
   #reply = [];           // text blocks since the last prompt or tool call
   #said = null;          // Claude's chat message still being added to (no tool call since)
+  #command = null;        // the last command's timeline item, until its output arrives
   #toolItems = new Map(); // tool_use id -> timeline item
   #artifactCalls = new Map(); // tool call id -> what it does to an artifact (see artifactCall), awaiting its result
 
@@ -112,6 +113,15 @@ export class TranscriptReader {
     };
   }
 
+  // A command's output, shown next to it: its first line, e.g. "Kept model as Opus 5.5".
+  #commandOutput(raw) {
+    const out = String(raw).match(/^\s*<local-command-(?:stdout|stderr)>([\s\S]*?)<\/local-command-/)?.[1];
+    if (!this.#command || out === undefined) return;
+    const first = out.replace(/\x1b\[[0-9;]*m/g, '').split('\n').map((l) => oneLine(l)).find(Boolean);
+    if (first) this.#command.output = first;
+    this.#command = null;
+  }
+
   #line(line) {
     const t = this.#t;
     const sidechain = this.#sidechain;
@@ -125,6 +135,15 @@ export class TranscriptReader {
     if (e.gitBranch && e.gitBranch !== 'HEAD') t.branch = e.gitBranch; // HEAD: not a git repo, or detached
     if (e.type === 'custom-title' && e.customTitle) this.#customTitle = e.customTitle;
     if (e.type === 'ai-title' && e.aiTitle) this.#aiTitle = e.aiTitle;
+
+    // Commands that run in the terminal (/model, /context) are system entries: the command,
+    // then its output in the next one.
+    if (e.type === 'system' && e.subtype === 'local_command' && typeof e.content === 'string') {
+      const p = classifyPrompt(e.content);
+      if (p?.text) t.timeline.push(this.#command = { ts: e.timestamp, kind: 'command', text: p.text });
+      else this.#commandOutput(e.content);
+      return;
+    }
 
     const m = e.message;
     if (!m || typeof m !== 'object') return;
@@ -143,8 +162,9 @@ export class TranscriptReader {
             images += u.images;
             p.text = u.text;
           }
+          if (!p) this.#commandOutput(b.text); // older transcripts save the output as a user entry
           if (p?.text) {
-            t.timeline.push({ ts: e.timestamp, ...p });
+            t.timeline.push(p.kind === 'command' ? (this.#command = { ts: e.timestamp, ...p }) : { ts: e.timestamp, ...p });
             if (p.kind === 'prompt') {
               t.messages.push(asked = { role: 'user', ts: e.timestamp, text: p.text });
               this.#said = null;

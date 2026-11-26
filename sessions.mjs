@@ -7,6 +7,18 @@
 import { describeTool, questionText } from './tools.mjs';
 import { withoutUploads } from './transcript.mjs';
 
+// Built-in commands that run in the terminal without starting a turn. Claude Code still
+// reports them as a submitted prompt, but no Stop follows, so they must not mark the session
+// as working. Commands that do reach the model (/compact, /init, /review, skills) aren't here.
+const LOCAL_COMMANDS = new Set([
+  'add-dir', 'agents', 'bashes', 'bug', 'config', 'context', 'copy', 'cost', 'doctor', 'effort',
+  'export', 'fast', 'feedback', 'help', 'hooks', 'ide', 'keybindings', 'login', 'logout', 'mcp',
+  'memory', 'model', 'output-style', 'permissions', 'plugin', 'plugins', 'privacy-settings',
+  'release-notes', 'rename', 'resume', 'rewind', 'sandbox', 'stats', 'status', 'tasks', 'terminal-setup',
+  'theme', 'todos', 'upgrade', 'usage', 'vim',
+]);
+export const isLocalCommand = (prompt) => LOCAL_COMMANDS.has(/^\/([\w-]+)(?:\s|$)/.exec(prompt?.trim() ?? '')?.[1]);
+
 const DECISION_NOTIFICATIONS = new Set(['permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog', 'agent_needs_input']);
 
 // Applies one hook event to `sessions` (a Map) and returns the updated session, or null when
@@ -24,6 +36,7 @@ export function applyHook(sessions, ev, now) {
       set(s, 'waiting');
       break;
     case 'UserPromptSubmit':
+      if (isLocalCommand(ev.prompt)) break; // nothing for Claude to work on, and not a prompt to show
       set(s, 'working');
       if (ev.prompt) {
         const { text, images } = withoutUploads(ev.prompt);

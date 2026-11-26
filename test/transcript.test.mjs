@@ -251,3 +251,24 @@ test('a doc made through the Claude Docs connector is listed, edits update it, a
     publishedAt: '2026-11-04T01:00:00Z', updatedAt: '2026-11-04T01:05:00Z',
   }]);
 });
+
+test('terminal-only commands show in the timeline with the first line of their output', () => {
+  const t = parseTranscript([
+    { type: 'user', message: { role: 'user', content: 'Real question' } },
+    { type: 'system', subtype: 'local_command', timestamp: 't1', content: '<command-name>/model</command-name>\n  <command-message>model</command-message>\n  <command-args></command-args>' },
+    { type: 'system', subtype: 'local_command', content: '<local-command-stdout>Kept model as `Opus 5.5`</local-command-stdout>' },
+    { type: 'system', subtype: 'local_command', content: '<command-name>/context</command-name>\n<command-args></command-args>' },
+    { type: 'system', subtype: 'local_command', content: '<local-command-stdout> \x1b[1mContext Usage\x1b[22m\n lots more</local-command-stdout>' },
+    { type: 'system', subtype: 'local_command', content: '<command-name>/skills</command-name>' },
+    { type: 'system', subtype: 'local_command', content: '<local-command-stdout></local-command-stdout>' },
+    // older transcripts: the same, as user entries
+    { type: 'user', message: { role: 'user', content: '<command-name>/cost</command-name>' } },
+    { type: 'user', message: { role: 'user', content: '<local-command-stdout>Total cost: $1.20</local-command-stdout>' } },
+  ].map((l) => JSON.stringify(l)).join('\n'));
+  assert.equal(t.lastPrompt, 'Real question');
+  assert.deepEqual(t.messages.map((m) => m.text), ['Real question'], 'not in the chat');
+  assert.deepEqual(t.timeline.slice(1).map(({ text, output }) => [text, output]), [
+    ['/model', 'Kept model as `Opus 5.5`'], ['/context', 'Context Usage'], ['/skills', undefined], ['/cost', 'Total cost: $1.20'],
+  ]);
+  assert.equal(t.timeline[1].ts, 't1');
+});

@@ -466,9 +466,13 @@ composer.form.addEventListener('submit', async (e) => {
   try {
     const res = await post(`/api/sessions/${encodeURIComponent(id)}/send`, { text, images: imagesPayload(images) });
     if (!res.ok) throw new Error((await res.text()) || `Error ${res.status}`);
+    const { local } = await res.json().catch(() => ({}));
     drafts.delete(id);
     clearImages(images);
     if (composer.sessionId === id) { composer.text.value = ''; composer.status.textContent = 'Sent'; renderComposerImages(); }
+    // /model, /context and the like answer in the terminal (or open a menu there): show it.
+    // A session that's not running yet has no Terminal tab, so the Timeline shows instead.
+    if (local && selectedId === id && !selectedAgent) setTab(sessions.find((s) => s.id === id)?.terminal?.live ? 'terminal' : 'timeline');
   } catch (err) {
     composer.status.textContent = `Not sent: ${err.message}`; // the text stays in the box
   } finally {
@@ -1522,7 +1526,8 @@ function timelineSection(d) {
           h('span', { class: 'tl-time' }, it.ts ? clock(it.ts) : ''),
           h('div', { class: 'tl-body' },
             it.kind === 'prompt' ? [h('span', { class: 'tag you' }, 'You'), h('span', { class: 'tl-text' }, it.text)]
-              : it.kind === 'command' || it.kind === 'note' ? [h('span', { class: 'tag' }, it.kind === 'command' ? 'Command' : 'Note'), h('span', { class: 'tl-text muted' }, it.text)]
+              : it.kind === 'command' || it.kind === 'note' ? [h('span', { class: 'tag' }, it.kind === 'command' ? 'Command' : 'Note'), h('span', { class: 'tl-text muted' }, it.text),
+                it.output && h('span', { class: 'tl-text' }, `→ ${it.output}`)]
               : [h('span', { class: 'tag' }, it.tool), h('span', { class: 'tl-text' }, it.text),
                 it.error && h('span', { class: 'tag err' }, 'failed'),
                 it.command && it.command !== it.text && h('code', { class: 'cmd' }, it.command),

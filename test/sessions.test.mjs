@@ -73,3 +73,19 @@ test('counts each time a session starts needing you and each finished turn', () 
   applyHook(m, ev('Stop'), 9);
   assert.equal(m.get('s1').doneCount, 2);
 });
+
+test('a terminal-only command like /copy leaves the status and last prompt alone', () => {
+  const m = new Map();
+  applyHook(m, ev('UserPromptSubmit', { prompt: 'fix the bug' }), 1);
+  applyHook(m, ev('Stop'), 2);
+  applyHook(m, ev('UserPromptSubmit', { prompt: '/copy' }), 3);
+  applyHook(m, ev('UserPromptSubmit', { prompt: '/model opus' }), 4);
+  assert.equal(m.get('s1').status, 'waiting');
+  assert.equal(m.get('s1').lastPrompt, 'fix the bug');
+  assert.equal(m.get('s1').lastEventAt, 4);
+
+  applyHook(m, ev('UserPromptSubmit', { prompt: '/review' }), 5); // reaches the model
+  assert.equal(m.get('s1').status, 'working');
+  applyHook(m, ev('UserPromptSubmit', { prompt: '/copyedit this' }), 6);
+  assert.equal(m.get('s1').lastPrompt, '/copyedit this');
+});
