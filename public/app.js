@@ -400,6 +400,7 @@ const composer = {
   status: document.getElementById('composer-status'),
   stop: document.getElementById('composer-stop'),
   end: document.getElementById('composer-end'),
+  clear: document.getElementById('composer-clear'),
   send: document.getElementById('composer-send'),
   sessionId: null,
 };
@@ -421,6 +422,7 @@ function renderComposer(s) {
   composer.note.hidden = !composer.note.textContent;
   composer.stop.hidden = !(live && s.status === 'working');
   composer.end.hidden = !live;
+  composer.clear.hidden = !(live && (s.status === 'waiting' || s.status === 'idle'));
 }
 
 composer.text.addEventListener('input', () => drafts.set(composer.sessionId, composer.text.value));
@@ -476,6 +478,25 @@ for (const [button, action, label] of [[composer.stop, 'interrupt', 'Stopping…
     composer.status.textContent = res?.ok ? '' : 'Couldn’t reach the monitor server';
   });
 }
+
+// /clear starts a new session in the same terminal: follow it there.
+composer.clear.addEventListener('click', async () => {
+  const id = composer.sessionId;
+  if (!confirm('Clear this session? Claude starts fresh in the same terminal with an empty context. This conversation stays in the list.')) return;
+  composer.clear.disabled = true;
+  composer.status.textContent = 'Clearing…';
+  try {
+    const res = await post(`/api/sessions/${encodeURIComponent(id)}/clear`);
+    if (!res.ok) throw new Error((await res.text()) || `Error ${res.status}`);
+    const { id: next } = await res.json();
+    if (composer.sessionId === id) composer.status.textContent = '';
+    if (next && selectedId === id) select(next);
+  } catch (err) {
+    composer.status.textContent = `Not cleared: ${err.message}`;
+  } finally {
+    composer.clear.disabled = false;
+  }
+});
 
 // Catch up on a redraw that waited while you typed in the detail view.
 document.getElementById('detail-content').addEventListener('focusout', () => {

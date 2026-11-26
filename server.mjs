@@ -756,7 +756,7 @@ async function handle(req, res) {
     return sendJson(res, { ok: true, pinned: on });
   }
 
-  const act = pathname.match(/^\/api\/sessions\/([\w-]+)\/(send|interrupt|end|key)$/);
+  const act = pathname.match(/^\/api\/sessions\/([\w-]+)\/(send|interrupt|end|key|clear)$/);
   if (req.method === 'POST' && act) {
     const [, id, action] = act;
     const owned = terminals.owned.get(id);
@@ -781,6 +781,15 @@ async function handle(req, res) {
       return sendJson(res, { ok: true });
     }
     if (!live) throw new HttpError(409, 'This session isn’t running');
+    if (action === 'clear') {
+      const status = sessions.get(id)?.status;
+      if (status === 'needs_you') throw new HttpError(409, 'Claude is waiting on a prompt. Answer it first.');
+      if (status === 'working') throw new HttpError(409, 'Claude is working. Stop it first.');
+      let next;
+      try { next = await terminals.clear(id); } catch (err) { throw new HttpError(502, err.message); }
+      broadcast();
+      return sendJson(res, { ok: true, id: next });
+    }
     try {
       if (action === 'interrupt') await terminals.key(id, 'escape');
       else if (action === 'key') {

@@ -26,6 +26,7 @@ export const KEYS = {
 const TRUST_PROMPT = /trust this folder/i;
 const PASTE_SETTLE_MS = 250; // let Claude Code take in a paste before Enter submits it
 const SUBMIT_CHECK_MS = 700;  // then how long it gets to clear its input box
+const CLEAR_WAIT_MS = 5000;   // how long /clear gets to start the new session
 
 // Whether a message is still in Claude Code's input box: the last line starting with the
 // prompt mark (❯) is the box, and a submitted message only shows above it.
@@ -162,6 +163,24 @@ export class Terminals {
       if (!stillInPrompt(await this.#run(['capture-pane', '-p', '-t', pane]).catch(() => ''), text)) return;
     }
     throw new Error('Claude Code didn’t take the message: it’s still in the input box. Check the Terminal tab.');
+  }
+
+  // Runs /clear in the session. Claude Code then carries on in the same process under a new
+  // session id, which it writes to its session file: resolves with that id (null if it doesn't
+  // show up within a few seconds), and the new session keeps the old one's folder and model.
+  async clear(id) {
+    const { pid } = this.#panes.get(id) ?? {};
+    await this.send(id, '/clear');
+    for (let waited = 0; waited < CLEAR_WAIT_MS; waited += 250) {
+      const next = (await this.#sessionOf(pid))?.sessionId;
+      if (next && next !== id) {
+        this.owned.set(next, { ...this.owned.get(id), here: false });
+        await this.refresh();
+        return next;
+      }
+      await sleep(250);
+    }
+    return null;
   }
 
   async key(id, key) {

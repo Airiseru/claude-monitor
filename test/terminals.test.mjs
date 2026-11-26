@@ -48,7 +48,11 @@ mkdir -p "$FAKE_HOME/.claude/sessions"
 printf '{"sessionId":"%s","cwd":"%s"}' "$id" "$PWD" > "$FAKE_HOME/.claude/sessions/$$.json"
 printf '\\e[?2004h'   # bracketed paste on, as Claude Code has it
 stty -echo
-exec cat >> "$FAKE_LOG"
+# /clear: carry on under a new session id, as Claude Code does.
+while IFS= read -r line; do
+  printf '%s\\n' "$line" >> "$FAKE_LOG"
+  case "$line" in *"/clear"*) printf '{"sessionId":"%s-cleared","cwd":"%s"}' "$id" "$PWD" > "$FAKE_HOME/.claude/sessions/$$.json" ;; esac
+done
 `);
   chmodSync(fake, 0o755);
   process.env.FAKE_HOME = home;
@@ -88,6 +92,18 @@ test('a message goes in as one bracketed paste, then Enter', { skip: !tmux && 't
   await terminals.end(id);
   assert.ok(!terminals.isLive(id));
   await assert.rejects(terminals.send(id, 'hi'), /isn’t running/);
+});
+
+test('/clear follows the session to its new id, keeping folder and model', { skip: !tmux && 'tmux not installed' }, async () => {
+  const id = await terminals.start({ cwd: work, model: 'haiku' });
+  await waitFor(() => logText().includes(`START ${id}`), 'start');
+  await sleep(200);
+  const next = await terminals.clear(id);
+  assert.equal(next, `${id}-cleared`);
+  assert.ok(terminals.isLive(next));
+  assert.ok(!terminals.isLive(id));
+  assert.deepEqual(terminals.owned.get(next), { cwd: work, model: 'haiku', here: false });
+  await terminals.end(next);
 });
 
 test('notices the folder-trust question, and a session that stopped', { skip: !tmux && 'tmux not installed' }, async () => {
