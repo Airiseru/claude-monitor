@@ -12,7 +12,11 @@ const SECTIONS = [
 const STATUS_LABEL = {
   needs_you: 'Needs you', working: 'Working', waiting: 'Waiting for you', idle: 'Not seen live yet', ended: 'Ended',
 };
-const LIVE = new Set(['needs_you', 'working']); // can't be removed from the list while live
+const LIVE = new Set(['needs_you', 'working']); // not cleared in bulk while live
+// One session can always be removed, except while it runs in the monitor's tmux (End it there).
+// A Claude Code that died without its SessionEnd hook stays "working" forever; removing it is
+// safe, since a session that's still running comes back on its next event.
+const canRemove = (s) => !(LIVE.has(s.status) && s.terminal?.live);
 const LONG_REPLY = 1200; // characters before a reply is shown collapsed
 
 let sessions = [];
@@ -149,6 +153,7 @@ function confirmRemove(ids) {
     const dialog = h('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' },
       h('h2', { id: 'confirm-title' }, one ? 'Remove this session from the list?' : `Remove ${ids.length} sessions from the list?`),
       h('p', {}, one ? `“${titleOf(one)}” will be hidden from the monitor.` : 'They will be hidden from the monitor.'),
+      one && LIVE.has(one.status) && h('p', {}, 'It still shows as live. If Claude Code is really still running it, it comes back on its next update.'),
       h('form', { method: 'dialog', class: 'actions' },
         h('button', { class: 'btn', value: 'cancel', autofocus: true }, 'Cancel'),
         h('button', { class: 'btn danger', value: 'remove' }, 'Remove')));
@@ -684,7 +689,7 @@ function openCardMenu(id, x, y, returnTo) {
   const items = [
     h('button', { role: 'menuitem', onclick: pick(() => setPinned(s, !s.pinned)) }, s.pinned ? 'Unpin' : 'Pin'),
     h('button', { role: 'menuitem', onclick: pick(() => { if (selectedId !== id) select(id); startRename(sessions.find((x) => x.id === id) ?? s); }) }, 'Rename'),
-    !LIVE.has(s.status) && h('button', { role: 'menuitem', class: 'danger', onclick: pick(() => removeSessions([id])) }, 'Remove from list'),
+    canRemove(s) && h('button', { role: 'menuitem', class: 'danger', onclick: pick(() => removeSessions([id])) }, 'Remove from list'),
   ].filter(Boolean);
   const el = h('div', { class: 'card-menu', role: 'menu', 'aria-label': `Options for “${titleOf(s)}”` }, items);
   el.addEventListener('keydown', (e) => {
@@ -1222,7 +1227,7 @@ function renderDetail() {
           class: 'btn', 'aria-pressed': String(s.pinned), onclick: () => setPinned(s, !s.pinned),
           title: s.pinned ? 'Let it close after 48 quiet hours and drop off after 5 days' : 'Keep it open and in the list, however long it’s quiet',
         }, s.pinned ? 'Unpin' : 'Pin'),
-        !LIVE.has(s.status) && h('button', { class: 'btn', onclick: () => removeSessions([s.id]) }, 'Remove from list'))),
+        canRemove(s) && h('button', { class: 'btn', onclick: () => removeSessions([s.id]) }, 'Remove from list'))),
     needSection(s),
     s.status === 'working' && s.activity && h('p', { class: 'now' }, h('strong', {}, 'Now: '), s.activity),
     selectedAgent ? agentView(s, d) : [
