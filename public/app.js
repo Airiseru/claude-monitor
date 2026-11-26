@@ -1253,6 +1253,8 @@ function renderDetail() {
   } else {
     content.scrollTop = scroll;
   }
+  const pre = document.getElementById('terminal-screen');
+  if (pre) pinScreen(pre, s.id);
   showToBottom();
 }
 
@@ -1386,10 +1388,18 @@ function chatSection(d) {
 // buttons for the keys Claude Code's menus and dialogs need.
 const TERMINAL_KEYS = [['enter', 'Enter'], ['escape', 'Esc'], ['up', '↑'], ['down', '↓'], ['tab', 'Tab'], ['shift-tab', '⇧Tab'], ['1', '1'], ['2', '2'], ['3', '3']];
 const screen = { id: null, text: '', error: null };
+// How far you've scrolled up from the bottom of each session's screen, kept across redraws
+// (every session update rebuilds the panel). Starts at the bottom, where the prompt is.
+const screenScroll = new Map(); // session id -> pixels from the bottom
+
+function pinScreen(pre, id) {
+  pre.scrollTop = pre.scrollHeight - pre.clientHeight - (screenScroll.get(id) ?? 0);
+}
 
 function terminalSection(s) {
   const pre = h('pre', { id: 'terminal-screen', class: 'terminal-screen', 'aria-label': 'Terminal screen', 'aria-live': 'off' },
     screen.id === s.id ? screen.text || ' ' : 'Loading…');
+  pre.addEventListener('scroll', () => screenScroll.set(s.id, pre.scrollHeight - pre.clientHeight - pre.scrollTop), { passive: true });
   return h('section', { class: 'block terminal' },
     h('div', { class: 'terminal-keys', role: 'group', 'aria-label': 'Press a key in the terminal' },
       h('span', { class: 'muted small' }, 'Press'),
@@ -1413,7 +1423,7 @@ async function loadScreen() {
   }
   // Update in place: a full redraw would interrupt typing and reset scrolling.
   const pre = document.getElementById('terminal-screen');
-  if (pre) pre.textContent = screen.text || ' ';
+  if (pre) { pre.textContent = screen.text || ' '; pinScreen(pre, s.id); }
   const error = document.getElementById('terminal-error');
   if (error) { error.textContent = screen.error ?? ''; error.hidden = !screen.error; }
 }
