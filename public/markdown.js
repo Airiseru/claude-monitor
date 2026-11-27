@@ -161,13 +161,27 @@ export function renderMarkdown(src, doc = document) {
     return parent;
   };
 
+  // Sits over a code block's corner (outside the <pre>, so it stays put when the code scrolls
+  // sideways) and copies exactly the block's text, which dragging a selection often doesn't.
+  const copyButton = (text) => {
+    const btn = el('button', 'md-copy');
+    btn.type = 'button'; btn.textContent = 'Copy'; btn.title = 'Copy to clipboard';
+    btn.onclick = async () => {
+      try { await navigator.clipboard.writeText(text); btn.textContent = 'Copied'; } catch { btn.textContent = 'Couldn’t copy'; }
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    };
+    return btn;
+  };
+
   const block = (b) => {
     switch (b.type) {
       case 'heading': return inline(b.inline, el(`h${Math.min(b.level + 2, 6)}`, 'md-h'));
       case 'p': return inline(b.inline, el('p'));
       case 'hr': return el('hr');
       case 'code': {
-        const pre = el('pre', 'md-code'); const c = el('code'); c.textContent = b.text; pre.append(c); return pre;
+        const pre = el('pre', 'md-code'); const c = el('code'); c.textContent = b.text; pre.append(c);
+        const wrap = el('div', 'md-code-wrap'); wrap.append(pre, copyButton(b.text));
+        return wrap;
       }
       case 'quote': { const q = el('blockquote'); b.children.forEach((c) => q.append(block(c))); return q; }
       case 'ul': case 'ol': {

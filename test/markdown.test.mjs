@@ -56,3 +56,18 @@ test('inline: code, bold, italic, links; markers inside code stay literal', () =
 test('toPlainText drops markers for previews', () => {
   assert.equal(toPlainText('## Done\n\n- **Fixed** the `bug`\n- Tests pass'), 'Done Fixed the bug · Tests pass');
 });
+
+test('fenced code comes with a Copy button for exactly its text', () => {
+  const frag = renderMarkdown('Run:\n\n```sh\nnpm install\nnpm test\n```', fakeDoc);
+  const wrap = frag.children[1];
+  assert.equal(show(wrap), '<div><pre><code>npm install\nnpm test</code></pre><button>Copy</button></div>');
+  let written;
+  globalThis.navigator ??= {};
+  const saved = navigator.clipboard;
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t) => { written = t; } }, configurable: true });
+  return wrap.children[1].onclick().then(() => {
+    assert.equal(written, 'npm install\nnpm test');
+    assert.equal(wrap.children[1].textContent, 'Copied');
+    Object.defineProperty(navigator, 'clipboard', { value: saved, configurable: true });
+  });
+});

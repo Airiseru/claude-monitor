@@ -397,6 +397,15 @@ textarea.input, .composer textarea { resize: vertical; }
   overflow-x: auto; font: 12px/1.45 var(--mono);
 }
 .md pre.md-code code { border: 0; padding: 0; background: none; font: inherit; }
+.md .md-code-wrap { position: relative; }
+.md .md-copy {
+  position: absolute; top: 5px; right: 5px; opacity: 0; transition: opacity .12s;
+  font: 600 11.5px system-ui, sans-serif; color: var(--text); cursor: pointer;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px;
+}
+.md .md-code-wrap:hover .md-copy, .md .md-copy:focus-visible { opacity: 1; }
+.md .md-copy:hover { border-color: var(--muted); }
+@media (hover: none) { .md .md-copy { opacity: 1; } }
 .md blockquote { margin: 0 0 .6em; padding-left: 10px; border-left: 3px solid var(--border); color: var(--muted); }
 .md hr { border: 0; border-top: 1px solid var(--border); margin: .9em 0; }
 .md a { color: var(--accent); }
